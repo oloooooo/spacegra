@@ -102,9 +102,8 @@ from langgraph.types import Command
 from langgraph_sdk import get_client, get_sync_client
 from langgraph_sdk.client import LangGraphClient, SyncLangGraphClient
 
-from shared.outbox import completion_text, is_long_result, message_text, notice_text, result_body, task_status_of_run
-from graphs.access import session_scope as session_scope_mod
 from graphs.access.spaces import allowed_spaces, current_identity
+from shared.outbox import completion_text, is_long_result, message_text, notice_text, result_body, task_status_of_run
 
 logger = structlog.getLogger(__name__)
 
@@ -227,21 +226,7 @@ class AsyncTaskGuard(AgentMiddleware):
         else:
             all_spaces = allowed_spaces(cfg)
             user_spaces = None if all_spaces is None else sorted(all_spaces)
-        return {"configurable": {"user_spaces": user_spaces, **self._session_scope(cfg)}}, None
-
-    @staticmethod
-    def _session_scope(cfg: dict[str, Any]) -> dict[str, Any]:
-        """给子 agent 签一个窄凭证，让它能读**本会话**的会话文件（ADR-0015 §4.1）。
-
-        注意：这里**不**转发 `langgraph_auth_user`。一换，`allowed_spaces()` 会走普通
-        用户分支去读 `auth_user.user_spaces`，子 agent 的权限就从「本任务 space」放大成
-        「用户全部 space」，ADR-0005 的收窄当场失效。
-        """
-        owner = current_identity(cfg)
-        thread_id = str(((cfg or {}).get("configurable") or {}).get("thread_id") or "")
-        if not owner or owner == "local" or not thread_id:
-            return {}
-        return {"session_scope": session_scope_mod.mint(owner, thread_id)}
+        return {"configurable": {"user_spaces": user_spaces}}, None
 
     @staticmethod
     def _thread_meta(request: ToolCallRequest) -> dict[str, Any]:

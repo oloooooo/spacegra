@@ -2,7 +2,9 @@ from ast import List
 from typing import Literal
 
 from pydantic import BaseModel
+
 Permission = Literal["read", "write"]
+
 
 class MessagesBaseModel(BaseModel):
     message: str | None = None
@@ -10,7 +12,7 @@ class MessagesBaseModel(BaseModel):
 
 class RegisterRequest(BaseModel):
     identity: str
-    display_name: str 
+    display_name: str
     org_id: str | None = None
     email: str | None = None
     password: str
@@ -48,6 +50,3 @@ class CreateSpaceResponse(MessagesBaseModel):
 
 class CreateUserSpaceResponse(CreateSpaceResponse):
     user_identity: str
-
-
-

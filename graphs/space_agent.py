@@ -24,16 +24,14 @@ from typing import Any
 
 import dotenv
 from deepagents import FilesystemPermission, create_deep_agent
-from deepagents.backends import CompositeBackend, StoreBackend
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access import session_scope
-from graphs.model import model
-from graphs.access.spaces import allowed_spaces
-from shared.knowledge.spec import has_tables, knowledge_root, load_agent_spec
 from graphs.access.backend import SpaceBackend
+from graphs.access.spaces import allowed_spaces
+from graphs.model import model
 from graphs.tools import XLSX_TOOLS
+from shared.knowledge.spec import has_tables, knowledge_root, load_agent_spec
 
 dotenv.load_dotenv()
 
@@ -49,8 +47,6 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
     space = _space_of(config)
     _, system_prompt = load_agent_spec(space)
     has_space_tables = has_tables(space)
-    # 这个 run 有会话作用域（派活时签发的 session_scope 验签通过）→ 它能直接查会话文件
-    scope = session_scope.resolve(config)
 
     middleware: list[Any] = []
     tools: list[Any] = []
@@ -63,9 +59,6 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
                 max_result_chars=10000,
             )
         )
-    elif scope is not None:
-        # 空间里没有表，但本次会话上传过大表：直接给工具（不装 JS 解释器，只为查表）
-        tools.extend(XLSX_TOOLS)
     # 完成时的回写由服务端发件箱分发者负责（ADR-0010）：
     # 子 run 转终态 -> finalize_run 写发件箱行 -> 分发者在父线程空闲时开一轮唤醒 run。
     # 子图不再需要任何通知中间件。
@@ -75,12 +68,7 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
         system_prompt=system_prompt,
         tools=tools,
         middleware=middleware,
-        # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces；
-        # `/uploads/` 路由到本会话的 store 命名空间（ADR-0015 §4.1）。xlsx 的字节走工具直读
-        # 对象存储，不经过 backend。
-        backend=CompositeBackend(
-            default=SpaceBackend(root_dir=knowledge_root()),
-            routes={"/uploads/": StoreBackend(namespace=session_scope.uploads_namespace)},
-        ),
+        # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
+        backend=SpaceBackend(root_dir=knowledge_root()),
         permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
     )

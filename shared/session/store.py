@@ -1,8 +1,7 @@
 """会话文件在 LangGraph Store 里的命名空间与读写（ADR-0013）。
 
-三处共用：上传接口（`custom/api/uploads.py`）、主管中间件（`graphs/middleware/session_files.py`）、
-删会话清理（`custom/middleware/threads_delete.py`）。放这里而不是 `graphs/`：HTTP 路由会 import 它，
-别把整张图拖进启动路径。
+三处共用（main 已移除上传入口，底座保留给后续分支）：上传接口、主管中间件、删会话清理。
+放这里而不是 `graphs/`：HTTP 路由会 import 它，别把整张图拖进启动路径。
 
 两条不能改的约定：
 
@@ -66,9 +65,7 @@ def _file_data(text: str) -> dict[str, Any]:
     return {"content": text, "encoding": "utf-8", "created_at": now, "modified_at": now}
 
 
-async def put_md(
-    store: Any, identity: str, thread_id: str, name: str, text: str
-) -> dict[str, Any]:
+async def put_md(store: Any, identity: str, thread_id: str, name: str, text: str) -> dict[str, Any]:
     """写入/覆盖一个会话文件，带孤儿 TTL。返回给接口响应用的元数据。"""
     ns = session_namespace(identity, thread_id)
     key = session_key(name)
