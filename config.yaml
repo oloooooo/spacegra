@@ -3,7 +3,7 @@
 #
 # 什么放这里：非密钥的项目参数（配额、会话文件上限、对象存储地址、知识空间、发件箱）。
 # 什么不放这里：
-#   - 密钥 -> .env（JWT_SECRET / PASSWORD_PEPPER / SESSION_SCOPE_SECRET / S3_ACCESS_KEY /
+#   - 密钥 -> .env（JWT_SECRET / PASSWORD_PEPPER / S3_ACCESS_KEY /
 #     S3_SECRET_KEY / OPENAI_API_KEY）
 #   - aegra 原生配置 -> aegra.json、src/aegra_api/settings.py（.env 里的 HOST/PORT/POSTGRES_* 等）
 #
@@ -25,27 +25,28 @@ auth:
   # 登录/注册签发的用户 token 用它；子 agent 的服务 token 写死 10 年，不受此值影响。
   access_token_ttl: 3600
 
-# --- 会话文件 md（shared/session/store.py，ADR-0013）---
+# --- 会话文件 md（shared/session/store.py）---
+# main 已移除上传入口，这三项只剩底座在用（保留给后续分支，删了会让 store.py 启动即炸）
 session_files:
-  max_upload_mb: 10             # 单文件上限（POST /custom/uploads）
+  max_upload_mb: 10             # 单文件上限
   max_files_per_session: 50     # 每会话文件数
   upload_ttl_minutes: 4320      # 孤儿保留期（72h），语义是「最后读取后多久」
 
-# --- 会话大表 xlsx（custom/service/session_files.py、graphs/tools/xlsx/，ADR-0015）---
+# --- xlsx 工具（graphs/tools/xlsx/）---
 xlsx:
-  max_blob_mb: 10               # 单个 xlsx 的 HTTP 上限（与 md 的 max_upload_mb 分开）
+  max_blob_mb: 10               # 单个 xlsx 的 HTTP 上限（当前无入口，保留）
   max_cells: 2000000            # 结构性硬闸，超了第一次调工具就报错
-  max_xlsx_files_per_session: 20  # 同名覆盖不占名额
-  max_md_files_per_session: 10   # 未生效：md 个数上限走 session_files.max_files_per_session（见 UPLOAD.md §6）
-  max_blob_mb_per_user: 2048    # 每用户二进制总量（2GB）
+  max_xlsx_files_per_session: 20  # 当前无入口，保留
+  max_md_files_per_session: 10   # 未生效：md 个数上限走 session_files.max_files_per_session
+  max_blob_mb_per_user: 2048    # 每用户二进制总量（2GB）；当前无入口，保留
   cache_dir: .cache/xlsx        # 索引与字节的本机缓存，必须在 okf.dir（knowledge/）之外
   cache_ttl_days: 7
   query_budget_ms: 5000         # 单次 where 查询的 CPU 预算，超了 interrupt()
 
-# --- 对象存储（shared/session/blobs.py，ADR-0015/0016）---
+# --- 对象存储（shared/session/blobs.py，ADR-0016）---
 # 凭证**不在这里**，写 .env：S3_ACCESS_KEY / S3_SECRET_KEY（密钥不进 git）。
 s3:
-  # 空 = 不启用对象存储：上传会话大表返回 503，其余功能不受影响。
+  # 空 = 不启用对象存储（okf.backend 只能填 local）。
   endpoint: ""
   bucket: aegra-blobs
   region: us-east-1
@@ -54,7 +55,7 @@ s3:
   #   endpoint: http://127.0.0.1:8333
   #   .env:    S3_ACCESS_KEY=dev
   #            S3_SECRET_KEY=dev          # 未配 IAM 时任意值
-  #   验证：   POST /custom/uploads/tables 应回 201；再用 docs/S3.md §6 的 list_objects_v2 看对象
+  #   验证：   PYTHONPATH=. python scripts/okf_push_s3.py --dry-run；再用 docs/S3.md §6 的 list_objects_v2 看对象
   #
   # 【启用示例 2：真实 S3 / MinIO】
   #   endpoint: https://s3.us-east-1.amazonaws.com   # MinIO 填 http://host:9000

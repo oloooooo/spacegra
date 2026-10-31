@@ -1,6 +1,6 @@
 """本项目新增的**非密钥**配置：仓库根 `config.yaml`（逐键说明见 docs/configuration.md §3.2）。
 
-密钥不进这个文件，仍然只走环境变量：JWT_SECRET / PASSWORD_PEPPER / SESSION_SCOPE_SECRET /
+密钥不进这个文件，仍然只走环境变量：JWT_SECRET / PASSWORD_PEPPER /
 S3_ACCESS_KEY / S3_SECRET_KEY / OPENAI_API_KEY。aegra 原生配置走 `aegra.json` 与
 `src/aegra_api/settings.py`，也不在这里。
 

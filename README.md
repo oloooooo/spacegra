@@ -419,15 +419,15 @@ aegra-api/
 │   └── settings.py       # env settings
 ├── custom/               # HTTP surface for this deployment
 │   ├── app.py            # FastAPI app (aegra.json http.app)
-│   ├── middleware/       # auth handler, thread-delete route shadow
-│   ├── api/              # one file per URL domain (account/spaces/graphs/tasks/uploads/delivery)
-│   ├── service/          # business logic (account, quota, session files, outbox dispatcher)
+│   ├── middleware/       # auth handler
+│   ├── api/              # one file per URL domain (account/spaces/graphs/tasks/delivery)
+│   ├── service/          # business logic (account, quota, outbox dispatcher)
 │   └── db/               # ORM models + repositories
 ├── graphs/               # graph surface (runs only inside a run)
 │   ├── supervisor.py     # main agent graph (aegra.json graphs.supervisor)
 │   ├── space_agent.py    # per-space subagent graph (aegra.json graphs.domain_agent)
-│   ├── middleware/       # AsyncTaskGuard, SessionFilesMiddleware
-│   ├── access/           # space allow-list, signed session scope, ACL filesystem backend
+│   ├── middleware/       # AsyncTaskGuard
+│   ├── access/           # space allow-list, ACL filesystem backend
 │   ├── tools/            # xlsx (info/query/search/profile) + ask_user_question
 │   └── prompts/
 ├── shared/               # used by both sides; imports no framework
@@ -455,7 +455,6 @@ aegra-api/
 - Async subagent (ACP) design: [docs/design.md](docs/design.md)
 - Streaming reference (stream modes, sub-agent stream proxy): [docs/streaming.md](docs/streaming.md) (Chinese)
 - Frontend API contract (custom endpoints, SSE frames, interrupt/resume): [docs/frontend-api.md](docs/frontend-api.md) (Chinese)
-- File upload (md → Store, xlsx → S3; limits, delete chain): [UPLOAD.md](UPLOAD.md) (Chinese)
 - Glossary: [CONTEXT.md](CONTEXT.md)
 
 ## Web UI

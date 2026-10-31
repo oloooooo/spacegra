@@ -5,7 +5,7 @@
 
 两条不能改的约定：
 
-- **key 带前导斜杠**。`CompositeBackend` 把 `/uploads/x.md` 剥成 `/x.md` 交给
+- **key 带前导斜杠**。agent 眼里路径是 `/uploads/x.md`，前缀剥掉后交给
   `StoreBackend`，后者直接拿这个字符串当 store key（`store.get(ns, file_path)`）。
   存成 `x.md` 会导致 `/uploads/x.md` 读不到。
 - **命名空间里的身份做 hash**。`StoreBackend._validate_namespace` 只收

@@ -15,7 +15,6 @@
   - `supervisor` + `domain_agent` — 主 agent 与**唯一一个**领域子 agent 图；后者按 run config 里的 space 现读 prompt，所以用户有几个空间就有几个子 agent（不用改代码）。
 - **知识空间**：`knowledge/<空间名>/`，每个空间是一份 OKF（Markdown + YAML frontmatter，可带 xlsx 表格）。
 - **前端**（`web/`）：Vue 3 + Vite，左边会话、中间对话、右边面板（子任务实时进度 / 知识库文件树 / 定时任务）。
-- **文件上传**：md 进 LangGraph Store（白拿 fs 工具 + TTL）、xlsx 进对象存储（+ PG 元数据行），落点、限额、删除链见 [`UPLOAD.md`](./UPLOAD.md)。
 - **代码布局**：`custom/`（HTTP 面：`app.py` + `middleware/ api/ service/ db/`）、`graphs/`（图面：入口 `supervisor.py` / `space_agent.py` + `middleware/ access/ tools/ prompts/`）、`shared/`（两侧共用的纯逻辑：`config token outbox session/ knowledge/`），`knowledge/` 只放数据。依赖单向：两个包都只依赖 `shared/`，互不 import。详见 [`CONTEXT.md`](./CONTEXT.md) 的「代码布局」。
 
 ---
@@ -83,7 +82,7 @@ OPENAI_MODEL=deepseek-flash
 quota:
   max_threads_per_user: 50   # 含子线程；一个会话派 3~5 个子任务就吃掉 3~5 个名额
 s3:
-  endpoint: http://127.0.0.1:8333   # 留空 = 不启用对象存储（上传会话大表会 503）
+  endpoint: http://127.0.0.1:8333   # 留空 = 不启用对象存储（okf.backend 只能填 local）
 ```
 
 > `PASSWORD_PEPPER` 一旦改动，**已注册的账号全部无法登录**（bcrypt 哈希不再匹配），需要重新注册或重置密码。

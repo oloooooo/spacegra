@@ -3,7 +3,7 @@
 前端（独立仓库，Vue 3 + Vite）对接本服务时的接口契约。全部结论来自**实测**（真起服务、跑 supervisor 与三个领域子 agent）。
 
 实现位置：`custom/api/`，一个 URL 域一个文件——`account.py`（注册 / 登录 / whoami）、`graphs.py`（图清单）、`spaces.py`（空间与文件树）、
-`tasks.py`（任务状态 / SSE 流 / 取消）、`uploads.py`（会话文件）、`delivery.py`（投递 ack）；路由前缀都是 `/custom`。除了这一层，其余接口直接用 LangGraph 原生端点（见 §4）。
+`tasks.py`（任务状态 / SSE 流 / 取消）、`delivery.py`（投递 ack）；路由前缀都是 `/custom`。除了这一层，其余接口直接用 LangGraph 原生端点（见 §4）。
 
 另有 **3 个内部接口**：
 
@@ -116,44 +116,6 @@ event: end        data: {"status": "success"}
 - `stream_mode` 查询参数可覆盖，默认 `messages,custom`；`values` 每步都是整态快照，量大，要才加。
 
 前置条件：子 run 创建时必须声明 `stream_mode=["messages","custom"]`（`graphs/middleware/async_task_guard.py` 已声明）。若不声明，aegra 默认只产 `values`，代理订阅不到 token 流。
-
-### 3.7 `POST /custom/uploads`
-
-把一个 md 文件挂到当前会话（[adr/0013](./adr/0013-session-files-live-in-store.md)）。`multipart/form-data`，字段 `thread_id` + `file`。
-
-```json
-{"name": "报告.md", "path": "/uploads/报告.md", "bytes": 12034,
- "uploaded_at": "2026-10-24T02:11:03+00:00", "ttl_minutes": 4320}
-```
-
-- 校验顺序固定：会话归属 → 文件名 → 扩展名 → 大小 → 编码。先挡归属与文件名，再边读边判大小（超限即 `413`），最后才解码。
-- 错误码：别人的会话 `404`（与原生接口一致，不给“存在但无权”的信号）；文件名非法/超 200 字符/非 UTF-8 `422`；非 `.md` `415`；超 `session_files.max_upload_mb`（默认 10）或本会话文件数已达 `session_files.max_files_per_session`（默认 50）`413`；store 未就绪 `503`。
-- 同名重传 = 覆盖（PUT 语义，`/uploads` 下永远只有一份），不占新名额。
-- 文件落在 LangGraph Store，**不进 Space**；`path` 是主管眼里的虚拟路径（`/uploads/<文件名>`）。主管与**同一条会话里派出的子 agent** 都能读到（子 agent 靠派活时签发的 `session_scope`）；主管**下一轮 run 起始**才拿到清单（`graphs/middleware/session_files.py`），所以本轮 run 看不到刚传的文件。
-- 孤儿 TTL 默认 72 小时（`session_files.upload_ttl_minutes`）：活跃会话每轮读清单会续期，没人读才过期；删会话即清空。
-- **没有列表/删除接口**：前端只能自己记住传过什么；要删文件目前只能删会话。
-
-### 3.8 `POST /custom/uploads/tables`
-
-把一个 xlsx 挂到当前会话（[adr/0015](./adr/0015-large-tables-in-object-storage.md)）。`multipart/form-data`，字段 `thread_id` + `file`。
-
-```json
-{"name": "cbam-reporting_报价表.xlsx", "path": "/uploads/cbam-reporting_报价表.xlsx",
- "space": "cbam-reporting", "bytes": 4956, "sha256": "…", "indexed": false}
-```
-
-- **文件名必须是 `<空间名>_<表名>.xlsx`**。空间名只决定「主管派哪个子 agent」，**不决定存哪**；
-  它必须在该用户的 `user_spaces` 里，否则 `422`。
-- 校验顺序：会话归属 → 字节大小 → 文件名/空间 → 流式写入。前两步便宜，大文件在第三步之后才碰。
-- 错误码：会话不是你的 `404`；非 `.xlsx` `415`；超 `xlsx.max_blob_mb`（默认 10）、超每会话文件数
-  （`xlsx.max_xlsx_files_per_session`，默认 20）或超每用户总量（`xlsx.max_blob_mb_per_user`，默认 2048）`413`；
-  文件名非法 / 空间没权限 `422`；对象存储未就绪 `503`。
-- **`indexed:false` 是正常状态**：索引在第一次调 `xlsx_*` 工具时才建，建完写回对象存储。
-- 同名重传 = 覆盖（PUT 语义）；同内容重传命中同一个 key，不重建索引。
-- 字节进对象存储（`sessions/{h(identity)}/{thread_id}/…`），**md 仍进 Store**；
-  子 agent 只能在同一条会话里读（靠派活时签发的 `session_scope`）。
-- 没有列表/删除接口：删除走删会话（`DELETE /threads/{id}`，连带清 PG 行与整个前缀）。
-  运维细节见 [S3.md](./S3.md)。
 
 ## 4. 直接用的原生接口
 
@@ -270,7 +232,6 @@ POST /threads/{thread_id}/runs/crons
 
 - 代理接口是**单次 Run 订阅**：子 agent 若被 `update_async_task` 再跑一轮，前端要按新的 `run_id` 重新连。
 - `service_token()` 是 10 年期长期 token（沿用 ADR-0004 的 shortcut），只在服务端使用，不下发浏览器。
-- 没有把文件写进 Space 的接口：空间知识只能手工放盘 / `scripts/okf_push_s3.py`（见 [S3.md](./S3.md)）；
-  上传的 xlsx 属于会话文件（§3.8），**不落 Space**。也没有列出/删除已上传文件的接口
-  （删会话即清空）。
+- 没有把文件写进 Space 的接口：空间知识只能手工放盘 / `scripts/okf_push_s3.py`（见 [S3.md](./S3.md)）。
+  文件上传接口（原 §3.7/§3.8）已从 main 移除。
 - 没有 refresh token。

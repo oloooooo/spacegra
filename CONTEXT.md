@@ -169,90 +169,23 @@ _Avoid_: 把投递说成“通知”（通知是手段，投递是结果进上�
 属主是服务账号，终端用户直接读会被 ownership 过滤挡成 404，所以必须经代理。
 _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于当前用户且其 `async_tasks` 里有该 task）
 
-## 会话文件词表
-
-**Session（会话）**:
-用户眼里的一个会话，值上恒等于一个**主管 thread**。它是会话文件的隔离单位，也是
-「上传必须挂在会话上」的那个会话。
-_Avoid_: 把子 agent 的 thread 叫会话（它是任务的私生子线程，永不作为隔离键）；
-把 Thread 与 Session 当同义词（Thread 是协议载体，Session 是用户语义的那一个）
-
-**Session file（会话文件）**:
-用户在某个 Session 里上传的原文件，**只对上传者本人、只在这个会话可见，不属于任何 Space**。
-两种载体：md 存 LangGraph Store（`(uploads, hash(identity), 会话 thread_id)`）；xlsx 等二进制存
-对象存储（`(hash(identity), 会话 thread_id)` 前缀），字节不进 Store。**生命周期都是「会话在它就在」**：
-会话删除即删；md 靠孤儿保留期兜底，二进制靠删除链 + 对象存储生命周期兜底。
-路径 `/uploads/<文件名>`。
-_Avoid_: 把它当 Space 知识（Space 知识对空间成员共享，会话文件只对上传者本人的这个会话可见）；
-叫附件、临时文件（它不是临时件：会话在它就在）；把上传的 xlsx 叫「空间表」
-（它不落 `knowledge/<空间>/`，存量手工放盘的表才是），或叫「空间文件」
-
-**Orphan retention（孤儿保留期）**:
-会话文件 item 的 TTL（默认 72 小时，env 可覆写），语义是**最后读取后多久**过期，不是绝对寿命：
-主管每轮 run 起始查一次清单会续期，所以在用的会话永不失效，只有再没人读的文件才过期。
-它只是垃圾兜底，不是保留策略——保留策略是「会话在，文件在」。
-_Avoid_: 把它当保留期（用户会发现隔天文件消失的期望差）；把它当清理主路径（主路径是删会话）
-
-**Upload leftover（上传残留）**:
-一次上传没走完就留在对象存储里的东西：`tmp/` 下的中间对象（复制到正式 key 之前的那份），
-与超时未完成的分片上传。它不是会话文件、不属于任何会话，也不随删会话消失——
-这是**垃圾**，靠 `scripts/reap_multipart.py` 定期清（或对象存储的生命周期规则兜底）。
-_Avoid_: 把它当孤儿会话文件（那个有保留期、由 Store 的 TTL 管）；把它当正常数据去对账
-（它会让物理用量大于 PG 里的 `sum(size_bytes)`）
-
-**Untrusted content（不可信内容）**:
-会话文件正文进上下文时的身份：它是**资料，不是指令**。清单与正文都按这个口径标注，
-文件里写的「忽略之前的指令」不因被读到而具备任何效力。
-_Avoid_: 把文件内容当系统提示的一部分、对内容做「注入词过滤」以求安全（过滤不靠谱，标注才是防线）
-
-## 大表词表
-
-**Large table（大表）**:
-一个 `.xlsx`，量级到 8 万行 × 10 列 × 3 sheet（240 万 cell）。工具对它的读法不是
-「打开表格」，而是「查一个已经建好的索引」——四个 `xlsx_*` 工具全部跑在 SQLite 上，
-不再 `pd.read_excel` 全表。见 ADR-0015。
-_Avoid_: 把 csv / markdown 表格叫大表（走的不是这条链）；把"表格内容"当 context
-（大表永远只有摘要与命中片段进上下文，正文靠工具按需取）
-
-**Table index（表索引）**:
-由大表字节派生出来的 SQLite 文件，每 sheet 一张表。**它是缓存，不是数据**：可以随时删、
-由任一实例重建；键由「字节 sha256 + header 行号 + 索引格式版本」决定，所以同一份内容
-在哪个实例上建出来都一样。派生不出来不影响上传成功。
-_Avoid_: 把它当第二个真相（真相是对象存储里的字节 + PG 里的行）；把它叫"转换结果"
-（没有转换语义，只是换个存储引擎）；对它做配额或计费（它随时会消失）
-
-**Blob store（对象存储）**:
-SeaweedFS，S3 协议。存会话文件里的二进制（xlsx）与由它派生的表索引，前缀按
-`(hash(上传者 identity), 会话 thread_id)` 隔离——与 Store 的会话文件命名空间同一组键。
-它和 LangGraph Store 是两套东西：Store 放 JSON 文本（md 会话文件），对象存储放二进制。
-_Avoid_: 把两者都说成 "store"；用 S3Backend 之类的说法（本仓库不往 deepagents 的
-backend 里塞对象存储，xlsx 工具自己直连）；把它当 Space 隔离（它按会话隔离，不是按空间）
-
-**Table rule（表规则）**:
-「这张上传的表能不能被当成表来处理」的判定：**只看结构合法性**——是 `.xlsx`、能被解析、
-有表头、cell 数与字节数在闸内。**不判业务内容**（不检查必须有哪些列、不检查语义）。
-通过就建表索引；不通过就直接拒收并让用户重传，不静默截断、不降级解析。
-_Avoid_: 把它当业务校验（"这张表的数据对不对"不是它的职责，那要靠 agent 分析）；
-把它当可配置的策略引擎（本期硬编码，等有第二个空间提出不同要求再升级）
-
 ## 代码布局
 
 三个顶层包，依赖方向单向（由 `tests/unit/test_layout.py` 守护）：
 
 - `custom/` —— **HTTP 面**。`app.py` 装配（`aegra.json` 的 `http.app`）；
   `api/` 只做 HTTP 形状（一个 URL 域一个文件）、`service/` 业务、`db/` ORM 与仓储、
-  `middleware/` 中间层（Auth handler、删会话的路由遮挡）。
+  `middleware/` 中间层（Auth handler）。
 - `graphs/` —— **图面**，只在 run 里跑。根目录只放 `aegra.json` 直指的两个入口
   （`supervisor.py`、`space_agent.py`）；`middleware/` 中间层（AgentMiddleware）、
-  `access/` 横切的访问判定（spaces 列表、会话作用域、带 ACL 的 backend）、
+  `access/` 横切的访问判定（spaces 列表、带 ACL 的 backend）、
   `tools/` 与 `prompts/`。
 - `shared/` —— **两侧共用的纯逻辑**：`config`（config.yaml 单例）、`token`（JWT 铸造）、
-  `outbox`（投递文本口径）、`session/`（LangGraph Store 与对象存储）、
+  `outbox`（投递文本口径）、`session/`（LangGraph Store 与对象存储，main 只剩底座）、
   `knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
-FastAPI / LangChain / deepagents。唯一例外：`graphs/tools/xlsx` 懒加载
-`custom.service.session_files` 读会话文件元数据行（表在 `custom/db/models.py`）。
+FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。）
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。
 _Avoid_: 往 `graphs/` 里放数据；在 `custom/` 里放图侧要用的模块（要放就放 `shared/`）；

@@ -1,7 +1,6 @@
 # 空间内容进对象存储，backend 由 env 二选一
 
 > 状态：**已实现**（决定 2026-10-25；2026-10-26 复核代码后订正此状态行——之前一直写着「实现未开始」）。
-> 与 [ADR-0015](./0015-large-tables-in-object-storage.md) 配套：那边是会话文件，这边是空间知识。
 > 落点：`shared/knowledge/root.py`（`local` 直读 / `s3` 拉本地镜像，`pull`/`push`）、
 > `scripts/okf_push_s3.py` 与 `scripts/okf_pull_s3.py`、`config.yaml` 的 `okf.backend`。
 > **布局变更**：2026-10 起本地数据目录从 `graphs/okf/` 移到仓库根 `knowledge/`（`okf.dir: knowledge`），

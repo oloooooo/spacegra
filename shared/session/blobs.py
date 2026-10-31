@@ -1,6 +1,7 @@
-"""对象存储（SeaweedFS，S3 协议）的最小封装：会话文件里的二进制与表索引。
+"""对象存储（SeaweedFS，S3 协议）的最小封装。
 
-设计见 `docs/adr/0015`、`docs/large-files.md` §2/§3。三条不能改的约定：
+当前唯一调用方是 OKF 镜像（`shared/knowledge/root.py`，ADR-0016）。会话文件与大表上传已从
+main 移除，但本模块作为底座保留（`feat/unified-files-*` 分支依赖它）。三条不能改的约定：
 
 - **key 前缀按会话说**：`sessions/{h(identity)}/{thread_id}/...`。所以「删会话」= 删这个
   前缀，字节与索引一次清完。`h()` 与 Store 命名空间共用 `session_store.identity_digest`，
