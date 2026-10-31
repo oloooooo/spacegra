@@ -7,24 +7,15 @@ from custom.api.delivery import router as delivery_router
 from custom.api.graphs import router as graphs_router
 from custom.api.spaces import router as spaces_router
 from custom.api.tasks import router as tasks_router
-from custom.api.uploads import router as uploads_router
-from custom.middleware.threads_delete import (
-    assert_shadows_core_delete,
-)
-from custom.middleware.threads_delete import (
-    router as threads_delete_router,
-)
 from custom.service.outbox_dispatcher import dispatcher as outbox_dispatcher
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动自检 + 发件箱分发者（ADR-0010）。
+    """发件箱分发者（ADR-0010）。
 
-    删会话的清理依赖路由注册顺序遮挡（ADR-0013）。
     分发者每个进程跑一个，多进程靠 SKIP LOCKED + 租约分工。
     """
-    assert_shadows_core_delete(app)
     await outbox_dispatcher.start()
     try:
         yield
@@ -39,9 +30,6 @@ app.include_router(spaces_router)
 app.include_router(graphs_router)
 app.include_router(tasks_router)
 app.include_router(delivery_router)
-app.include_router(uploads_router)
-# 必须在核心路由 include 之前注册，才盖得住原生 delete_thread
-app.include_router(threads_delete_router)
 
 
 def _openapi_with_bearer():
