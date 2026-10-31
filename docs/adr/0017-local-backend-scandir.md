@@ -112,6 +112,10 @@ cProfile（5 s 样本，同一次 glob）给出唯一答案：
 **什么时候该换成 FS 之外的方案**：空间内容挪到对象存储后（ADR-0016 的 `s3` 后端读的是
 本地镜像，所以本类仍然适用）；若哪天直接对 S3 做 glob，这里的 scandir 假设不再成立。
 
+**接入状态（2026-10-31）**：**暂不接生产**。`graphs/access/backend.py` 的 `SpaceBackend` 与
+`graphs/supervisor.py` 保持原样，本类目前只被基准脚本与 `tests/unit/test_local_backend.py` 使用。
+要启用时最省事的一步是让 `SpaceBackend` 继承 `LocalBackend`（ACL 逻辑不动），代价是多一层继承。
+
 ## 怎么验证（本地）
 
 ```bash
