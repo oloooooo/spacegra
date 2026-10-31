@@ -10,8 +10,8 @@
 
 1. custom 不许 import graphs（HTTP 启动路径不能拖进整张图）；
 2. shared 不许 import 任何一侧（它是两侧的公共底座，不能反向依赖）；
-3. graphs 只有一处例外：``graphs/tools/xlsx/__init__.py`` 懒加载
-   ``custom.service.session_files`` 读会话文件元数据行（表在 ``custom/db/models.py``）。
+3. graphs 一行例外也没有了（原来唯一一处是 xlsx 懒加载会话文件元数据，
+   已随上传功能移除）。
 
 另外校验 aegra.json 里声明的入口文件与导出名真的存在——重命名漏改配置会在这里报错，
 而不是等到启动时。
@@ -28,7 +28,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 # graphs -> custom 的唯一例外：相对导入的模块前缀
-GRAPHS_ALLOWED = {"custom.service.session_files"}
+GRAPHS_ALLOWED: set[str] = set()  # graphs 不该 import custom（session_files 已随上传功能移除）
 
 
 def _imports(path: Path) -> set[str]:
