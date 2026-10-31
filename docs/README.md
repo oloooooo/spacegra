@@ -16,7 +16,7 @@
 | [streaming.md](./streaming.md) | **流式参考**：`client.stream` 结构与全部 9 种模式实测矩阵、aegra 模式处理与 `version="v2"` 硬编码、deepagents/`astream_events` 适配、v3 进程内✅/HTTP❌、前端 vs 调试选型、子图流不回传等坑、子 agent 流代理与 `async_tasks` 僵尸状态 |
 | [frontend-api.md](./frontend-api.md) | **前端接口参考**：`custom/api/` 下的前端接口（`account.py` 注册/登录/whoami + `graphs.py` 图清单 + `spaces.py` 空间与文件树/成员 + `tasks.py` 任务状态/流，共 10 个）+ 3 个内部接口（`delivery.py` 投递 ack 两个、`tasks.py` 取消）、鉴权与 token 时长、原生接口清单、SSE 帧契约（增量 / interrupt-resume / 回写消息识别）、定时任务实测行为、会话删除与已知限制 |
 | [S3.md](./S3.md) | **对象存储操作手册**：起 SeaweedFS、全部相关 env（大小/配额/缓存/镜像）、「本地文件怎么进 S3」（OKF 推送脚本 / 运维直连）、key 布局、校验与排错、清理与容量对账 |
-| [adr/](./adr/README.md) | **决定记录**：现行 8 篇 + 历史 6 篇（`adr/archive/`）。索引里按编号列出「一句话结论 + 代码落点」，并给了按主题的阅读顺序（权限与空间 / 任务投递 / 配额） |
+| [adr/](./adr/README.md) | **决定记录**：现行 9 篇 + 历史 6 篇（`adr/archive/`）。索引里按编号列出「一句话结论 + 代码落点」，并给了按主题的阅读顺序（权限与空间 / 任务投递 / 配额） |
 
 其他相关文档：
 

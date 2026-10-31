@@ -3,13 +3,13 @@
 **ADR 编号永不复用**：代码注释里写着 `ADR-0013` 这类编号，改布局、合文档都不改号——
 要查某条决定，先在这张表里按编号找文件。
 
-- 本目录：**仍然约束当前代码**的决定（8 篇）
+- 本目录：**仍然约束当前代码**的决定（9 篇）
 - [`archive/`](./archive/)：历史决定（6 篇）——被取代、或已被实现固化/被别处文档覆盖
 
 状态行是唯一必须跟着代码更新的字段；ADR 正文里的模块路径、env 名、行号都是**当时的布局**，
 别照着找文件（当前布局见 [`../../CONTEXT.md`](../../CONTEXT.md) 的「代码布局」）。
 
-## 现行（8）
+## 现行（9）
 
 | # | 决定 | 一句话 | 代码落点 |
 |---|---|---|---|
@@ -21,6 +21,7 @@
 | [0012](./0012-thread-quota-replaces-task-limit.md) | thread 配额取代派活上限 | 限的是"账号能有几个会话"（子线程计入所属主管），不是并发算力 | `custom/service/quota.py`、`custom/middleware/auth.py` |
 | [0014](./0014-no-hitl-for-eval.md) | 不做 eval 的 HITL 审批 | 子任务只支持取消与状态通知；取消不占发件箱行、不唤醒主管 | `custom/api/tasks.py`、`graphs/middleware/async_task_guard.py` |
 | [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3` 二选一，`s3` 读本地镜像（不重写 14 个 backend 方法） | `shared/knowledge/root.py`、`scripts/okf_{push,pull}_s3.py` |
+| [0017](./0017-local-backend-scandir.md) | 本地 backend 一趟 scandir | 每次调用只 `resolve` 一次、`os.scandir` 枚举、不跟符号链接；`glob` 快 50×、`grep` 仍交给 ripgrep | `graphs/access/local_backend.py` |
 
 ## 已归档（6）
 
