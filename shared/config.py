@@ -43,6 +43,8 @@ _SPEC: dict[str, tuple[str, Any]] = {
     "s3.endpoint": ("S3_ENDPOINT", ""),
     "s3.bucket": ("S3_BUCKET", "aegra-blobs"),
     "s3.region": ("S3_REGION", "us-east-1"),
+    "uploads.store": ("UPLOADS_STORE", "auto"),
+    "uploads.dir": ("UPLOADS_DIR", "data/uploads"),
     "mirage.redis_url": ("MIRAGE_REDIS_URL", ""),
     "mirage.cache_limit": ("MIRAGE_CACHE_LIMIT", "256MB"),
     "mirage.index_ttl_seconds": ("MIRAGE_INDEX_TTL_SECONDS", 600),

@@ -25,24 +25,22 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.backend import SpaceBackend
 from graphs.access.mirage_backend import for_agent, workspace_for
 from graphs.access.spaces import upload_scope
+from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
 from graphs.prompts import XLSX_SYSTEM_PROMPT
 from graphs.tools import XLSX_TOOLS
 from shared import config
-from shared.knowledge.spec import knowledge_root
 from shared.session.upload_rule import XLSX_AGENT
 
 dotenv.load_dotenv()
 
 
 def xlsx_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """只看 `/uploads` 的 backend（Mirage 模式）或本地磁盘的只读 backend。"""
+    """只看 `/uploads` 的 backend：Mirage 模式走 S3VFS，其余模式走本地会话目录。"""
     if config.get("okf.backend") != "s3fs":
-        # 本地磁盘：上传目录不存在，按"不设限的只读根"退让（正常情况下这条分支不会被调用）。
-        return SpaceBackend(root_dir=knowledge_root())
+        return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
     workspace = workspace_for(owner=owner, thread_id=thread_id, agents={XLSX_AGENT: ()})
     return for_agent(workspace, XLSX_AGENT)

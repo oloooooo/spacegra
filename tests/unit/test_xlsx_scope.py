@@ -99,14 +99,16 @@ def test_uploads_allowed_in_mirage_mode(okf, monkeypatch):
     xlsx_mod._check_scope("/uploads/碳排放清单.xlsx", _cfg())
 
 
-def test_uploads_denied_in_local_mode(okf):
-    """本地磁盘模式没有上传目录，/uploads 既不是空间也不是根散文件，一律拒。"""
-    with pytest.raises(ValueError, match="无权访问"):
-        xlsx_mod._check_scope("/uploads/x.xlsx", _cfg("space-a"))
+def test_uploads_allowed_in_local_mode(okf):
+    """本地磁盘模式也有上传目录（`uploads.store=fs`），/uploads 一样放行。
+
+    具体落到哪个目录由 `graphs.access.uploads_backend.upload_path()` 按会话解析，
+    这里只负责不被"空间名白名单"误拦。
+    """
+    xlsx_mod._check_scope("/uploads/x.xlsx", _cfg("space-a"))
 
 
-def test_uploads_traversal_still_denied(okf, monkeypatch):
+def test_uploads_traversal_still_denied(okf):
     """放行只看解析后的首段：`/uploads/../space-b/x.xlsx` 真开的是 space-b。"""
-    monkeypatch.setattr(xlsx_mod.app_config, "get", lambda key, *a: "s3fs" if key == "okf.backend" else a[0])
     with pytest.raises(ValueError, match="无权访问"):
         xlsx_mod._check_scope("/uploads/../space-b/t.xlsx", _cfg("space-a"))

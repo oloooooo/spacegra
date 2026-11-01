@@ -338,7 +338,7 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 
 #### xlsx 工具（`graphs/tools/xlsx/`）
 
-把知识空间里的存量 xlsx 建 SQLite 索引再查（`xlsx_info/query/search/profile`）。上传相关的三个键（`max_blob_mb`、`max_xlsx_files_per_session`、`max_blob_mb_per_user`）现在**无人读**，仅为兼容保留。
+把知识空间里的存量 xlsx 第一次被查时解析成 Parquet，再交给 DuckDB 查（`xlsx_info/query/search/profile`）。上传相关的三个键（`max_blob_mb`、`max_xlsx_files_per_session`、`max_blob_mb_per_user`）现在**无人读**，仅为兼容保留。
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
@@ -347,17 +347,26 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 | `xlsx.max_xlsx_files_per_session` | `20` | `MAX_XLSX_FILES_PER_SESSION` | 每会话 xlsx 个数（当前无入口） |
 | `xlsx.max_md_files_per_session` | `10` | `MAX_MD_FILES_PER_SESSION` | ⚠ **当前代码没读这个键**，改它不生效 |
 | `xlsx.max_blob_mb_per_user` | `2048` | `MAX_BLOB_MB_PER_USER` | 每用户二进制总量（当前无入口） |
-| `xlsx.cache_dir` | `.cache/xlsx` | `XLSX_CACHE_DIR` | 索引的本机缓存（必须在 OKF 根之外） |
+| `xlsx.cache_dir` | `.cache/xlsx` | `XLSX_CACHE_DIR` | 派生缓存的本机目录（`derived/<sha256>/h<header>/`，必须在 OKF 根之外） |
 | `xlsx.query_budget_ms` | `5000` | `XLSX_QUERY_BUDGET_MS` | 单次 `where` 查询的 CPU 预算，超了 `interrupt()` |
 | `xlsx.cache_mode` | `local` | `XLSX_CACHE_MODE` | 派生缓存介质：`local` 只落本机 / `s3` 同时写对象存储供多实例共享（未配对象存储时自动退回 `local`） |
 | `xlsx.cache_prefix` | `xlsx-derived` | `XLSX_CACHE_PREFIX` | `cache_mode=s3` 时的对象前缀；派生对象按内容哈希命名，可随时清 |
 | `xlsx.cache_local_max_mb` | `2048` | `XLSX_CACHE_LOCAL_MAX_MB` | 本机派生缓存预算，超了按最久未改动淘汰 |
 
+#### 上传介质（`shared/session/uploads.py`）
+
+上传字节存在哪，与 `okf.backend`（知识空间怎么读）正交，见 ADR-0018 §9。
+
+| YAML 键 | 默认 | 覆盖变量 | 说明 |
+|---|---|---|---|
+| `uploads.store` | `auto` | `UPLOADS_STORE` | `auto`（配了 `s3.endpoint` 就是 `s3`，否则 `fs`）/ `fs` / `s3`；`okf.backend: s3fs` 只接受 `s3` |
+| `uploads.dir` | `data/uploads` | `UPLOADS_DIR` | `store=fs` 时的落地目录（相对仓库根），按 `<owner>/<thread>/` 分层 |
+
 #### 对象存储（`shared/session/blobs.py`）
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `s3.endpoint` | 空 | `S3_ENDPOINT` | 空 = 对象存储未启用；`okf.backend: s3` 只能改成 `local` |
+| `s3.endpoint` | 空 | `S3_ENDPOINT` | 空 = 不启用对象存储（`uploads.store: auto` 因此选 `fs`，`okf.backend` 只能填 `local` 或镜像 `s3`） |
 | `s3.bucket` | `aegra-blobs` | `S3_BUCKET` | 桶名，启动时自动创建（幂等） |
 | `s3.region` | `us-east-1` | `S3_REGION` | 任意值（SeaweedFS 不校验） |
 

@@ -49,7 +49,7 @@ _root = store.root
 def _check_scope(path: str | Path, config: object) -> None:
     """空间隔离（ADR-0005）：XLSX_TOOLS 不经 backend（自己读字节），必须在 tool 层拦。
 
-    三种放行：``/<空间名>/…`` 的首段 ∈ allowed spaces；根散文件共享只读；Mirage 模式下
+    三种放行：``/<空间名>/…`` 的首段 ∈ allowed spaces；根散文件共享只读；
     ``/uploads/…``（本会话的上传文件，上传那一刻 API 已经按会话鉴过权）。
 
     判定落在**解析后**的路径上：`/空间A/../空间B/x.xlsx` 首段是 A（有权限），但真正
@@ -73,8 +73,9 @@ def _check_scope(path: str | Path, config: object) -> None:
     if not parts:
         return  # "/" 本身；ls 类调用方自己按规则过滤
     first = parts[0]
-    if first == "uploads" and _mirage_mode():
-        # 见上加粗两行：上传文件由 API 侧按会话鉴权，profile 又只挂本会话那一个目录，
+    if first == "uploads":
+        # 见上两行：上传文件由 API 侧按会话鉴权，读的时候又只在本会话目录里找
+        # （s3fs 走 profile 限定的 S3VFS，其余模式走 upload_path() 的会话目录），
         # 这里不按空间名判。判定落在**解析后**的首段上，`/uploads/../x/…` 仍会被下面拦住。
         return
     if first in spaces:
@@ -93,17 +94,29 @@ def _mirage_mode() -> bool:
 async def _local_copy(path: str, runtime: ToolRuntime) -> str:
     """把虚拟路径下的 xlsx 落到本地缓存，返回本地路径。
 
-    本地磁盘模式原样返回（工具本来就是直接读盘的）；s3fs 模式对象存储里没有本地路径，
-    必须先取字节：pandas/openpyxl 读不了 HTTP，索引也要一个真实的文件。
+    本地模式的空间文件原样返回（工具未就就是直接读盘的）；上传文件要先换算到本会话
+    的上传目录（`uploads.store=s3` 时这一步会从对象存储拉一份回本地）；s3fs 模式对象
+    存储里没有本地路径，必须先取字节——pandas/openpyxl 读不了 HTTP，索引也要真实文件。
     """
     if not _mirage_mode():
-        return path
+        if not _is_uploads(path):
+            return path
+        from graphs.access.uploads_backend import upload_path
+
+        local = await asyncio.to_thread(upload_path, runtime.config, path)
+        if local is None:
+            raise FileNotFoundError(f"上传目录里没有 {path}")
+        return str(local)
     from graphs.access.mirage_backend import download_bytes
 
     data = await download_bytes(runtime.config, path)
     if data is None:
         raise FileNotFoundError(f"对象存储里没有 {path}")
     return str(store.virtual_cache_path(path, data))
+
+
+def _is_uploads(path: str) -> bool:
+    return str(path).strip().lstrip("/\\").split("/", 1)[0] == "uploads"
 
 
 # ---------- 同步实现（跑在线程池里） ----------

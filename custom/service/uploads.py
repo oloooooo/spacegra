@@ -1,17 +1,20 @@
-"""上传：字节进对象存储，元数据进 `session_object`（ADR-0018）。
+"""上传：字节进介质（本地目录或对象存储），元数据进 `session_object`（ADR-0018）。
 
-两本账的分工：对象存储是真相（key = ``uploads/<owner>/<thread>/<文件名>``），
+两本账的分工：介质是真相（key/路径 = ``<owner>/<thread>/<文件名>``），
 `session_object` 行回答"这个会话里有哪些文件、该派给谁"。**读路径不查这张表**
-（Mirage 直接按前缀列对象），只有上传写入、配额、删会话清理会用到它。
+（本地目录直接列，s3fs 由 Mirage 按前缀列对象），只有上传写入、配额、删会话清理会用到它。
+
+介质的选择（`uploads.store`）收在 `shared/session/uploads.py`：这里不判断是 S3 还是
+本地目录，只调 ``put_stream`` / ``delete``，所以单机部署改一个配置值就够。
 
 写序不可换（与旧 ADR-0013 同一条教训）：
 
-1. 把字节写进对象存储（``blobs.put_stream``，边写边算 sha256，超限自己 abort）；
+1. 把字节写进介质（``uploads.put_stream``，边写边算 sha256，超限自己清干净）；
 2. 再 upsert 台账行 —— 行里带上传那一刻算好的投递目标 ``target_agent``。
 
-崩在 1 和 2 之间的后果：多一个没人认领的对象（下次同名上传按覆盖处理），
-比"行说有、字节没有"安全得多；反过来则会出现台账指向不存在的对象。
-所以 2 失败时尽力把 1 写的对象删掉，让状态回到"两边都没有"。
+崩在 1 和 2 之间的后果：多一个没人认领的文件（下次同名上传按覆盖处理），
+比"行说有、字节没有"安全得多；反过来则会出现台账指向不存在的文件。
+所以 2 失败时尽力把 1 写的字节删掉，让状态回到"两边都没有"。
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from custom.db.models import SessionObject
 from shared import config
-from shared.session import blobs
+from shared.session import uploads as upload_store
 from shared.session.upload_rule import route_upload
 
 logger = structlog.getLogger(__name__)
@@ -92,7 +95,6 @@ async def save_upload(
     （鉴权由路由层的 `_authorize_thread` + 空间成员表决定）。
     """
     name = safe_name(name)
-    key = blobs.upload_key(owner, thread_id, name)
     limit = size_limit(name)
 
     # 配额：先数后插不是原子的，并发上传同名/多文件时可能超出 1~2 个。
@@ -109,11 +111,18 @@ async def save_upload(
         raise UploadError(f"每个会话最多 {max_files} 个上传文件", 409)
 
     try:
-        sha256, size = await asyncio.to_thread(blobs.put_stream, src, key, max_bytes=limit)
-    except blobs.BlobTooLarge as e:
+        key, sha256, size = await asyncio.to_thread(
+            upload_store.put_stream,
+            src,
+            owner=owner,
+            thread_id=thread_id,
+            name=name,
+            max_bytes=limit,
+        )
+    except upload_store.UploadTooLarge as e:
         raise UploadError(str(e), 413) from e
-    except blobs.BlobUnavailable as e:
-        raise UploadError("对象存储暂不可用，请稍后重试", 503) from e
+    except upload_store.UploadUnavailable as e:
+        raise UploadError("上传存储暂不可用，请稍后重试", 503) from e
 
     target = route_upload(name, spaces)
     space = next((s for s in spaces if target == s), "")
@@ -142,7 +151,7 @@ async def save_upload(
     except BaseException:
         # 台账写不进去就不要留孤儿字节（同名覆盖已经把旧字节冲掉了，留着只会更乱）
         with contextlib.suppress(Exception):
-            await asyncio.to_thread(blobs.delete, key)
+            await asyncio.to_thread(upload_store.delete, owner, thread_id, name)
         raise
 
     logger.info(
@@ -152,6 +161,7 @@ async def save_upload(
         name=name,
         size=size,
         target_agent=target,
+        store=upload_store.store_mode(),
     )
     return {
         "name": name,

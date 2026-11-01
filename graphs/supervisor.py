@@ -25,13 +25,13 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain.tools import InjectedToolArg, ToolRuntime, tool
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.backend import SpaceBackend
 from graphs.access.mirage_backend import for_agent, workspace_for
 from graphs.access.spaces import allowed_spaces, upload_scope
+from graphs.access.uploads_backend import filesystem_backend
 from graphs.middleware.async_task_guard import AsyncTaskGuard
 from graphs.prompts import MAIN_SYSTEM_PROMPT
 from graphs.tools import MAIN_TOOLS
-from shared.knowledge.spec import knowledge_root, list_spaces, load_agent_spec, space_dir
+from shared.knowledge.spec import list_spaces, load_agent_spec, space_dir
 from shared.session.upload_rule import MAIN_AGENT, XLSX_AGENT
 
 logger = structlog.getLogger(__name__)
@@ -121,9 +121,9 @@ def domain_specs(config: RunnableConfig) -> dict[str, dict]:
 
 
 def supervisor_backend(config: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """主管的存储路由：本地磁盘按 space 隔离（ADR-0005）；s3fs 走 Mirage（ADR-0018）。"""
+    """主管的存储路由：Mirage（s3fs）或 本地磁盘（knowledge + 本会话 /uploads）。"""
     if not _mirage_mode():
-        return SpaceBackend(root_dir=knowledge_root())
+        return filesystem_backend(config)
     owner, thread_id = upload_scope(config)
     logger.info("mirage_backend", owner=owner, thread_id=thread_id)
     workspace = workspace_for(

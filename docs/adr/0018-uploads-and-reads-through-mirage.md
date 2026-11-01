@@ -1,12 +1,13 @@
-# 上传重建：对象存储是唯一真相，读路径全走 Mirage
+# 上传重建：字节与读路径都可切，集群走 Mirage
 
 > 状态：**已实现**（决定 2026-11-01）。
-> 落点：`graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
+> 落点：`graphs/access/mirage_backend.py`、`graphs/access/uploads_backend.py`、
+> `shared/session/uploads.py`（上传介质层）、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
 > `graphs/supervisor.py`、`graphs/space_agent.py`、`graphs/access/spaces.py`（`upload_scope`）、
 > `graphs/middleware/async_task_guard.py`（`_config_for` 转发上传目录）、
 > `custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py`、
 > `shared/session/blobs.py`（`upload_prefix`/`upload_key`）、`custom/db/models.py`（`target_agent`）、
-> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*`。
+> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `uploads.*`。
 > 取代：[`archive`](../adr/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
 > `feat/unified-files-s3` 分支上的 ADR-0017（同名不同内容）不采用。
 
@@ -137,6 +138,37 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 清（内容寻址、可重建，删了只是下次多解析一遍，不会丢数据）。升级后旧的
 `<cache_dir>/*.sqlite`（老索引文件）已经没人读，可以直接删。
 
+### 9. 单机也能跑：上传介质与读路径解耦
+
+对象存储不是所有部署的前提。单机 / 内网 demo / 评测机常常只有一个进程和一块盘，
+让人先架一套 S3 才能上传文件是说不过去的。所以把「字节存在哪」单独拎出来成一个旋钮，
+和「知识空间怎么读」正交：
+
+| `okf.backend` | `uploads.store` | 上传字节落在 | 读 `/uploads` 的路径 |
+| --- | --- | --- | --- |
+| `local`（缺省） | `fs` | `data/uploads/<owner>/<thread>/` | `LocalBackend` 直读，`CompositeBackend` 路由到 `/uploads/` |
+| `s3`（镜像） | `s3` | 对象存储 `uploads/…` | 首次读拉到同一本地目录再直读（`materialize`） |
+| `s3fs` | `s3`（强制） | 对象存储 `uploads/…` | Mirage 的 `S3VFS` 直读，不经过本模块 |
+
+三条约束：
+
+1. **介质按配置选**：`uploads.store` = `auto`（默认，配了 `s3.endpoint` 就是 `s3`，否则 `fs`）
+   / `fs` / `s3`。同一份代码在单机和集群上都跑，切换只改配置，不换分支、不装可选依赖。
+2. **本地读路径不引入 Mirage**：`local` 模式下 `/` 仍是 `SpaceBackend`（ADR-0005 / ADR-0017），
+   `/uploads/` 是 `graphs/access/local_backend.py` 的只读 `LocalBackend`，用
+   `CompositeBackend` 拼起来。基准（决定 3 与背景）已经说清楚：本地盘上 Mirage 更慢
+   （单文件读 0.91ms vs 0.53ms，`grep` 慢 19–38×），没有理由为一致性付这个钱。
+3. **组合错了要吵起来**：`s3fs` 只看得见对象存储里的 `uploads/`，所以
+   `uploads.validate()` 在这个组合下强制 `store == s3`，否则建模时直接抛错——
+   否则症状是「目录明明是空的」，排查成本远高于一次启动失败。
+
+介质层是 `shared/session/uploads.py` 一个文件：`put_stream`（本地写同目录临时文件再
+`os.replace`，对象存储走 `blobs.put_stream`）、`materialize`（`fs` 直接返回、`s3` 缺本地
+副本时拉一份）、`delete` / `delete_thread` / `iter_local_keys`。两种介质下
+台账（`session_object`）、路由（`upload_rule`）、配额、删会话清理完全共用一套代码。
+清理脚本 `scripts/reap_upload_orphans.py` 两种介质都扫：对象存储按 `LastModified`、
+本地按文件 mtime，都带 24h 窗口，避免删掉「字节已落、行未写」的在途上传。
+
 ## 代价与已知风险
 
 - **`grep` 慢**：L 档全库 grep 1839ms（S3）vs 宿主 ripgrep 351ms；S 档快（8.6ms vs 22.3ms）。
@@ -146,8 +178,10 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
   的量化解释器，不能拿到 shell。
 - **两个 S3 client**：`/` 和 `/uploads` 各一个 `S3VFS`（两套连接池），每 run 两个。
 - **只有异步方法**：Mirage 适配层不实现同步 `ls/read/...`，deepagents 侧一律走 `a*`。
-- **本地盘模式没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / ADR-0017），
-  上传目录在本地模式下不存在，`xlsx` 子 agent 也不挂。
+- **本地盘模式读路径没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / ADR-0017），
+  上传目录由 `LocalBackend` 挂在 `/uploads/`（ADR-0018 §9），不上 Mirage。
+- **本地上传目录不是共享存储**：`uploads.store=fs` 下多实例各存各的盘，会话被调度到
+  另一台就看不见自己的文件。多实例必须用 `s3`；这一点靠部署文档约束，代码不探测。
 - **派生缓存要占第二份存储**：Parquet 通常比 xlsx 小（列裁剪 + ZSTD），但 80k 行级别
   仍是 MB 级；`s3` 模式下对象数随"表 × sheet × header"增长，靠 TTL 回收。
 - **每次都先付解析费**：没有"不物化"的捷径，小表也要写一次 Parquet（20ms 级）。

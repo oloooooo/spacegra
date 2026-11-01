@@ -26,7 +26,11 @@ _Avoid_: 状态机阶段、phase
 
 **派生缓存（derived cache）**:
 xlsx 的 Parquet 副本。目录是**上传字节的 sha256 + 表头行号**（`<sha256>/h<header>/`），每个 sheet 一份，表第一次被查时才建；`xlsx.cache_mode` 决定只落本机（local）还是同时落对象存储供多实例共享（s3）。它不是真相，删了只会让下次查询多解析一遍。
-_Avoid_: 索引缓存（那指的是 `index.py` 的 SQLite 文件）、临时文件
+_Avoid_: 索引缓存（`index.py` 已删除）、临时文件
+
+**上传介质（upload store）**:
+上传字节到底存在哪：`uploads.store=fs` 落本机 `data/uploads/<owner>/<thread>/`，`s3` 落对象存储的 `uploads/` 前缀，`auto` 按 `s3.endpoint` 自动选。它和 `okf.backend`（知识空间怎么读）是**两个正交旋钮**：单机 fs+local，集群 s3+s3fs。
+_Avoid_: 会话文件存储、blob 存储（那是 `blobs.py` 这一层的旧叫法）
 
 **Cancel action**:
 取消动作的取值，取规范的 interrupt（仅取消）与 rollback（取消后删除该 Run 及其 checkpoint）；本服务额外接受 cancel 作为 interrupt 的别名，且 rollback 未实现。

@@ -27,13 +27,13 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.backend import SpaceBackend
 from graphs.access.mirage_backend import for_agent, workspace_for
 from graphs.access.spaces import allowed_spaces, upload_scope
+from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
 from graphs.tools import XLSX_TOOLS
 from shared import config
-from shared.knowledge.spec import has_tables, knowledge_root, load_agent_spec
+from shared.knowledge.spec import has_tables, load_agent_spec
 
 dotenv.load_dotenv()
 
@@ -52,7 +52,7 @@ def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backen
     """
     space = _space_of(config_)
     if config.get("okf.backend") != "s3fs" or not space:
-        return SpaceBackend(root_dir=knowledge_root())
+        return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
     workspace = workspace_for(owner=owner, thread_id=thread_id, agents={space: (space,)})
     return for_agent(workspace, space)

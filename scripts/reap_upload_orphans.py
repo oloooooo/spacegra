@@ -1,15 +1,15 @@
-"""清掉没有台账行的上传对象（ADR-0018）。
+"""清掉没有台账行的上传文件（ADR-0018）。
 
-删会话时 `session_object` 行靠外键 CASCADE 跟着删（迁移 `b8c9d0e1f2a3`），
-对象存储里的字节不会 —— 这个脚本负责扫 `uploads/<owner>/<thread>/` 前缀，
-把"台账里已经没有这个会话"且对象**够老**（默认 24h，避开上传写对象与写行之间的窗口）
-的字节删掉。
+删会话时 `session_object` 行靠外键 CASCADE 跟着删（迁移 `b8c9d0e1f2a3`），字节不会 ——
+这个脚本负责扫介质的 `<owner>/<thread>/` 前缀（对象存储的 `uploads/` 或本地的
+`data/uploads/`），把"台账里已经没有这个会话"且文件**够老**（默认 24h，避开上传写
+字节与写行之间的窗口）的东西删掉。两种介质都扫，介质由 `uploads.store` 自动决定。
 
     PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --dry-run      # 只看（默认）
     PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --apply        # 真删
     PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --apply --older-than-hours 6
 
-没有台账行的前缀**不一定**是孤儿：可能上传崩在"对象已写、行未落"之间。
+没有台账行的前缀**不一定**是孤儿：可能上传崩在"字节已写、行未落"之间。
 所以默认 24h，宁可留一会儿也不删刚写进来的东西。
 """
 
@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from custom.db.models import SessionObject
-from shared.session import blobs
+from shared.session import blobs, uploads
 
 
 @dataclass
@@ -36,6 +36,9 @@ class Report:
     orphan_prefixes: list[str] = field(default_factory=list)
     orphan_objects: int = 0
     orphan_bytes: int = 0
+    local_prefixes: list[str] = field(default_factory=list)
+    local_objects: int = 0
+    local_bytes: int = 0
 
 
 def _iter_prefixes(max_keys: int = 100_000) -> dict[str, list[dict]]:
@@ -62,6 +65,40 @@ def _iter_prefixes(max_keys: int = 100_000) -> dict[str, list[dict]]:
         token = page.get("NextContinuationToken")
 
 
+def _iter_local_prefixes() -> dict[str, list[dict]]:
+    """本地介质里按 `owner/thread/` 聚合的上传文件（用 mtime 当"新鲜度"）。"""
+    out: dict[str, list[dict]] = defaultdict(list)
+    for owner, thread, _name, path in uploads.iter_local_keys():
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        out[f"{owner}/{thread}/"].append(
+            {
+                "Key": f"{owner}/{thread}/{path.name}",
+                "Size": st.st_size,
+                "LastModified": datetime.fromtimestamp(st.st_mtime, UTC),
+            }
+        )
+    return out
+
+
+def _local_orphans(live: set[str], cutoff: datetime) -> tuple[list[str], int, int]:
+    """本地介质里该删的前缀 → `(前缀列表, 文件数, 字节数)`。"""
+    prefixes: list[str] = []
+    objects = 0
+    size = 0
+    for prefix, files in _iter_local_prefixes().items():
+        if prefix in live:
+            continue
+        if any(f["LastModified"] >= cutoff for f in files):
+            continue
+        prefixes.append(prefix)
+        objects += len(files)
+        size += sum(int(f["Size"] or 0) for f in files)
+    return prefixes, objects, size
+
+
 async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
     """算出该删哪些前缀（不删任何东西）。"""
     from aegra_api.core.database import db_manager
@@ -74,14 +111,16 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
 
         db_manager.engine = create_async_engine(settings.db.database_url, pool_size=2, pool_pre_ping=True)
 
-    prefixes = _iter_prefixes(max_keys)
+    prefixes: dict[str, list[dict]] = {}
+    if uploads.store_mode() == "s3":
+        prefixes = _iter_prefixes(max_keys)
     report = Report(scanned_prefixes=len(prefixes))
     cutoff = datetime.now(UTC) - older_than
 
     maker = get_session_maker()
     async with maker() as session:
         rows = (await session.execute(select(SessionObject.owner_identity, SessionObject.thread_id))).all()
-    live = {f"uploads/{owner}/{thread}/" for owner, thread in rows}
+    live = {f"{owner}/{thread}/" for owner, thread in rows}
 
     for prefix, objects in prefixes.items():
         if prefix in live:
@@ -93,6 +132,11 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
         report.orphan_prefixes.append(prefix)
         report.orphan_objects += len(objects)
         report.orphan_bytes += sum(int(o.get("Size") or 0) for o in objects)
+
+    local_prefixes, local_objects, local_bytes = _local_orphans(live, cutoff)
+    report.local_prefixes = local_prefixes
+    report.local_objects = local_objects
+    report.local_bytes = local_bytes
     return report
 
 
@@ -114,6 +158,9 @@ def main() -> None:
         f"孤儿 {len(report.orphan_prefixes)} 个（{report.orphan_objects} 个对象，"
         f"{report.orphan_bytes / 1024 / 1024:.1f}MB）"
     )
+    print(
+        f"本地介质孤儿 {len(report.local_prefixes)} 个（{report.local_objects} 个文件，{report.local_bytes / 1024 / 1024:.1f}MB）"
+    )
     for prefix in report.orphan_prefixes[:20]:
         print("  孤儿:", prefix)
     if args.xlsx_cache_days > 0:
@@ -127,6 +174,10 @@ def main() -> None:
     for prefix in report.orphan_prefixes:
         deleted = blobs.delete_prefix(prefix)
         print(f"  已删 {prefix} → {deleted} 个对象")
+    for prefix in report.local_prefixes:
+        owner, thread, _ = prefix.rstrip("/").split("/")
+        uploads.delete_thread(owner, thread)
+        print(f"  已删本地 {prefix}")
 
 
 if __name__ == "__main__":

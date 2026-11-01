@@ -43,6 +43,8 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+# 上传文件的本地介质（uploads.dir 的默认值）：用户数据，不进 git
+data/
 nosetests.xml
 coverage.xml
 *.cover

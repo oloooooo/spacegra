@@ -46,10 +46,18 @@ xlsx:
   cache_prefix: xlsx-derived    # cache_mode=s3 时的对象前缀（内容寻址，可随时清）
   cache_local_max_mb: 2048      # 本机派生缓存的总预算，超了按最久未改动淘汰
 
+# --- 上传文件的介质（shared/session/uploads.py，ADR-0018 §9）---
+# 决定上传的字节落在哪：单机 local 部署用 fs，多副本部署用 s3。
+# 与 okf.backend 的组合：local / s3（镜像）模式下 agent 通过本地目录读 /uploads；
+# s3fs 模式由 Mirage 的 S3VFS 直读，此时必须是 s3。
+uploads:
+  store: auto                   # auto = 配了 s3.endpoint 就用 s3，否则 fs；也可写死 fs / s3
+  dir: data/uploads             # fs 介质的根目录（不进 git），结构 <owner>/<thread>/<name>
+
 # --- 对象存储（shared/session/blobs.py，ADR-0016）---
 # 凭证**不在这里**，写 .env：S3_ACCESS_KEY / S3_SECRET_KEY（密钥不进 git）。
 s3:
-  # 空 = 不启用对象存储（okf.backend 只能填 local）。
+  # 空 = 不启用对象存储（uploads.store 的 auto 会因此选 fs，okf.backend 只能填 local / s3 镜像）。
   endpoint: ""
   bucket: aegra-blobs
   region: us-east-1
