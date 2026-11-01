@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from shared import config
@@ -14,6 +15,20 @@ from shared import config
 
 def cache_dir() -> Path:
     return Path(config.get("xlsx.cache_dir")).resolve()
+
+
+def virtual_cache_path(vpath: str, data: bytes) -> Path:
+    """s3fs 模式：把虚拟路径的字节落到本地缓存，返回本地路径。
+
+    文件名取内容哈希：同一张表重复下载不会让索引失效（`materialize` 的缓存键是
+    「路径 + mtime + size」），表改了才会换一个新文件名。
+    """
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    target = cache_dir() / "vpath" / f"{digest}{Path(vpath).suffix or '.bin'}"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return target
 
 
 def root() -> Path:

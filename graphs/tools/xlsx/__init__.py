@@ -38,6 +38,7 @@ from graphs.tools.xlsx.schema import (
     XlsxSearchArgs,
     XlsxSheet,
 )
+from shared import config as app_config
 
 # 兼容老调用点（测试里 monkeypatch 过这个模块级名字）
 _root = store.root
@@ -46,7 +47,8 @@ _root = store.root
 def _check_scope(path: str | Path, config: object) -> None:
     """空间隔离（ADR-0005）：XLSX_TOOLS 不经 backend（自己读字节），必须在 tool 层拦。
 
-    两种放行：``/<空间名>/…`` 的首段 ∈ allowed spaces；根散文件共享只读。
+    三种放行：``/<空间名>/…`` 的首段 ∈ allowed spaces；根散文件共享只读；Mirage 模式下
+    ``/uploads/…``（本会话的上传文件，上传那一刻 API 已经按会话鉴过权）。
 
     判定落在**解析后**的路径上：`/空间A/../空间B/x.xlsx` 首段是 A（有权限），但真正
     被打开的是 B 的文件。只比对原始字符串等于不设防（带 `..` 与符号链接一起兜住）。
@@ -69,12 +71,37 @@ def _check_scope(path: str | Path, config: object) -> None:
     if not parts:
         return  # "/" 本身；ls 类调用方自己按规则过滤
     first = parts[0]
+    if first == "uploads" and _mirage_mode():
+        # 见上加粗两行：上传文件由 API 侧按会话鉴权，profile 又只挂本会话那一个目录，
+        # 这里不按空间名判。判定落在**解析后**的首段上，`/uploads/../x/…` 仍会被下面拦住。
+        return
     if first in spaces:
         return  # 文件是否存在由 store.resolve_local 报
     if len(parts) == 1 and target.is_file():
         return  # 根散文件共享只读（Q3b）
     visible = sorted(spaces) or ["（无）"]
     raise ValueError(f"无权访问 {path}：{first} 不在你的空间列表 {visible} 内")
+
+
+def _mirage_mode() -> bool:
+    """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
+    return str(app_config.get("okf.backend")).strip().lower() == "s3fs"
+
+
+async def _local_copy(path: str, runtime: ToolRuntime) -> str:
+    """把虚拟路径下的 xlsx 落到本地缓存，返回本地路径。
+
+    本地磁盘模式原样返回（工具本来就是直接读盘的）；s3fs 模式对象存储里没有本地路径，
+    必须先取字节：pandas/openpyxl 读不了 HTTP，索引也要一个真实的文件。
+    """
+    if not _mirage_mode():
+        return path
+    from graphs.access.mirage_backend import download_bytes
+
+    data = await download_bytes(runtime.config, path)
+    if data is None:
+        raise FileNotFoundError(f"对象存储里没有 {path}")
+    return str(store.virtual_cache_path(path, data))
 
 
 def _conn(path: str, header: int) -> sqlite3.Connection:
@@ -86,13 +113,14 @@ def _conn(path: str, header: int) -> sqlite3.Connection:
 # ---------- 同步实现（跑在线程池里） ----------
 
 
-def _info(path: str, sheet: str | None, header: int) -> str:
-    with closing(_conn(path, header)) as conn:
-        return index.info(conn, store.display_name(path), sheet)
+def _info(local: str, display: str, sheet: str | None, header: int) -> str:
+    with closing(_conn(local, header)) as conn:
+        return index.info(conn, display, sheet)
 
 
 def _query(
-    path: str,
+    local: str,
+    _display: str,
     sheet: str | None,
     header: int,
     columns: list[str] | None,
@@ -100,17 +128,17 @@ def _query(
     limit: int,
     offset: int,
 ) -> str:
-    with closing(_conn(path, header)) as conn:
+    with closing(_conn(local, header)) as conn:
         return index.query(conn, sheet, columns, where, limit, offset)
 
 
-def _search(path: str, keyword: str, sheet: str | None, header: int, limit: int) -> str:
-    with closing(_conn(path, header)) as conn:
+def _search(local: str, _display: str, keyword: str, sheet: str | None, header: int, limit: int) -> str:
+    with closing(_conn(local, header)) as conn:
         return index.search(conn, keyword, sheet, header, limit)
 
 
-def _profile(path: str, sheet: str | None, header: int) -> str:
-    with closing(_conn(path, header)) as conn:
+def _profile(local: str, _display: str, sheet: str | None, header: int) -> str:
+    with closing(_conn(local, header)) as conn:
         return index.profile(conn, sheet)
 
 
@@ -123,7 +151,8 @@ async def _run(name: str, fn: Any, runtime: ToolRuntime, /, path: str, *args: An
     writer({"tool": name, "event": "start", "args": [path, *args]})
     try:
         _check_scope(path, runtime.config)
-        result = await asyncio.to_thread(fn, path, *args)
+        local = await _local_copy(path, runtime)
+        result = await asyncio.to_thread(fn, local, str(path), *args)
     except Exception as e:  # noqa: BLE001 —— 故意兜底，错误信息是给 agent 看的
         writer({"tool": name, "event": "error", "error": f"{type(e).__name__}: {e}"})
         return f"错误：{type(e).__name__}: {e}"

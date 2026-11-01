@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
+from deepagents.backends.protocol import FileDownloadResponse
 
 from graphs.access.mirage_backend import (
     SHARED_ROOT_FILES,
@@ -33,9 +36,7 @@ class TestAgentProfiles:
 
     def test_space_agent_sees_its_space_and_uploads(self) -> None:
         profiles = agent_profiles({"cbam-reporting": ("cbam-reporting",)})
-        assert profiles["cbam-reporting"] == {
-            "paths": {"hide": ["/"], "show": ["/cbam-reporting", UPLOADS_MOUNT]}
-        }
+        assert profiles["cbam-reporting"] == {"paths": {"hide": ["/"], "show": ["/cbam-reporting", UPLOADS_MOUNT]}}
 
     def test_space_agent_with_several_spaces(self) -> None:
         profiles = agent_profiles({"multi": ("a", "b")})
@@ -43,9 +44,7 @@ class TestAgentProfiles:
 
     def test_only_show_entries_never_paths_under_hide(self) -> None:
         # hide 只允许 "/"，具体授权一律用 show（Mirage 的 inline permissions 不许 show）
-        for profile in agent_profiles(
-            {MAIN_AGENT: (), XLSX_AGENT: (), "cbam-reporting": ("cbam-reporting",)}
-        ).values():
+        for profile in agent_profiles({MAIN_AGENT: (), XLSX_AGENT: (), "cbam-reporting": ("cbam-reporting",)}).values():
             paths = profile["paths"]
             if "hide" in paths and "/" in paths["hide"]:
                 assert "show" in paths
@@ -82,13 +81,34 @@ class _FakeInner:
     async def aexecute(self, command: str) -> str:  # pragma: no cover - 不该被调到
         return "boom"
 
+    async def adownload_files(self, paths: list[str]):  # noqa: ANN201
+        return [FileDownloadResponse(path=p, content=b"bytes") for p in paths]
+
+    def download_files(self, paths: list[str]):  # noqa: ANN201
+        return [FileDownloadResponse(path=p, content=b"bytes") for p in paths]
+
 
 class TestNormalisation:
-    def _backend(self) -> MirageBackend:
+    def _backend(self) -> MirageBackend:  # noqa: D401
         backend = MirageBackend.__new__(MirageBackend)  # 跳过真 Workspace 的构造
         backend._inner = _FakeInner()
         backend._session_id = "s"
         return backend
+
+    def test_download_files_delegates(self) -> None:
+        """基类的 `download_files` 是具体方法（默认抛 NotImplementedError），必须自己实现。
+
+        不实现的话 `__getattr__` 透传根本轮不到（属性在基类上已存在），xlsx 工具取文件时
+        会看到裸 `NotImplementedError`（2026-11-01 实测踩到）。
+        """
+        backend = self._backend()
+        assert backend.download_files(["/uploads/a.xlsx"])[0].content == b"bytes"
+        assert asyncio.run(backend.adownload_files(["/uploads/a.xlsx"]))[0].content == b"bytes"
+
+    def test_upload_files_denied(self) -> None:
+        backend = self._backend()
+        assert backend.upload_files([("/uploads/a.xlsx", b"x")])[0].error
+        assert asyncio.run(backend.aupload_files([("/uploads/a.xlsx", b"x")]))[0].error
 
     async def test_ls_swallowed_type_error_and_none(self) -> None:
         backend = self._backend()

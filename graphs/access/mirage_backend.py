@@ -32,6 +32,8 @@ from typing import Any
 from deepagents.backends.protocol import (
     BackendProtocol,
     EditResult,
+    FileDownloadResponse,
+    FileUploadResponse,
     GlobResult,
     GrepResult,
     LsResult,
@@ -156,10 +158,18 @@ async def close_workspace(workspace: Workspace | None) -> None:
     """
     if workspace is None:
         return
+    _drop_agent_backends(workspace)
     try:
         await workspace.close()
     except Exception:  # noqa: BLE001 —— 收尾失败不该让已成功的请求变 500
         logger.warning("关闭 Mirage Workspace 失败", exc_info=True)
+
+
+def _drop_agent_backends(workspace: Workspace) -> None:
+    """Workspace 回收时丢掉它的 backend 缓存（key 用 id，id 会被后续对象复用）。"""
+    prefix = f"{id(workspace)}:"
+    for key in [k for k in _agent_backends if k.startswith(prefix)]:
+        _agent_backends.pop(key, None)
 
 
 # ---------- 每会话的 Workspace 池 ----------
@@ -172,6 +182,7 @@ async def close_workspace(workspace: Workspace | None) -> None:
 _POOL_MAX = 8
 _POOL_TTL_SECONDS = 300.0
 _pool: dict[str, tuple[Workspace, float]] = {}
+_agent_backends: dict[str, MirageBackend] = {}
 
 
 def _signature(agents: Mapping[str, Collection[str]]) -> str:
@@ -224,6 +235,7 @@ async def close_all_workspaces() -> None:
     while _pool:
         _, (workspace, _) = _pool.popitem()
         await close_workspace(workspace)
+    _agent_backends.clear()
 
 
 def for_agent(workspace: Workspace, agent: str) -> MirageBackend:
@@ -233,6 +245,44 @@ def for_agent(workspace: Workspace, agent: str) -> MirageBackend:
     except Exception:  # noqa: BLE001 —— 池里复用时会撞上已存在的 session
         logger.debug("session 已存在，直接复用", extra={"agent": agent})
     return MirageBackend(workspace, sandbox_id=f"mirage-{agent}", session_id=agent)
+
+
+async def download_bytes(run_config: Any, path: str) -> bytes | None:
+    """按本 run 的身份/线程把虚拟路径的文件取回来（给读不了 HTTP 的本地工具用）。
+
+    作用域与图完全一致：同一个池化 Workspace + 同一套 profile，所以工具能拿到的东西不会
+    超过 agent 自己能 `read` 的范围。agent 名从 run config 反推：空间子 run 的
+    ``user_spaces`` 只有它自己那一个；通用表格子 agent 是空列表。
+    """
+    from graphs.access.spaces import allowed_spaces, upload_scope
+    from shared.session.upload_rule import XLSX_AGENT
+
+    spaces = allowed_spaces(run_config)
+    names = sorted(spaces) if spaces else []
+    agent = names[0] if names else XLSX_AGENT
+    agents: dict[str, tuple[str, ...]] = {agent: tuple(names)}
+
+    owner, thread_id = upload_scope(run_config)
+    workspace = workspace_for(owner=owner, thread_id=thread_id, agents=agents)
+    backend = _agent_backend(workspace, agent)
+    resp = await backend.adownload_files([path])
+    item = resp[0] if resp else None
+    if item is None:
+        return None
+    if item.error:
+        logger.warning("download_failed", path=path, error=item.error)
+        return None
+    return item.content
+
+
+def _agent_backend(workspace: Workspace, agent: str) -> MirageBackend:
+    """同一个 Workspace 上的 agent backend 只造一次（工具每次调用都要取文件）。"""
+    key = f"{id(workspace)}:{agent}"
+    backend = _agent_backends.get(key)
+    if backend is None:
+        backend = for_agent(workspace, agent)
+        _agent_backends[key] = backend
+    return backend
 
 
 # ---------- Backend ----------
@@ -263,6 +313,22 @@ class MirageBackend(BackendProtocol):
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    # `download_files` / `upload_files` 必须显式实现：基类里有**具体**方法（不是抽象方法），
+    # 它们默认抛 NotImplementedError，`__getattr__` 根本轮不到（属性在基类上已存在）。
+    # 症状：xlsx 工具取文件时看到裸 `NotImplementedError`。
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        return self._inner.download_files(paths)
+
+    async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        return await self._inner.adownload_files(paths)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [FileUploadResponse(path=path, error=_WRITE_DENIED) for path, _ in files]
+
+    async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [FileUploadResponse(path=path, error=_WRITE_DENIED) for path, _ in files]
 
     async def als(self, path: str) -> LsResult:  # noqa: D102 —— 见类 docstring
         try:
