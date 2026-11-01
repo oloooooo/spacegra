@@ -1,8 +1,10 @@
-# 空间内容进对象存储，backend 由 env 二选一
+# 空间内容进对象存储，backend 由配置选（local | s3 | s3fs）
 
 > 状态：**已实现**（决定 2026-10-25；2026-10-26 复核代码后订正此状态行——之前一直写着「实现未开始」）。
 > 落点：`shared/knowledge/root.py`（`local` 直读 / `s3` 拉本地镜像，`pull`/`push`）、
 > `scripts/okf_push_s3.py` 与 `scripts/okf_pull_s3.py`、`config.yaml` 的 `okf.backend`。
+> **2026-11 补一档 `s3fs`**：Mirage 直读对象存储（不拉镜像），见 ADR-0018 §2；
+> 本文的「镜像」决定对 `s3` 那一档仍然成立，降级理由也没变（那时还没有 Mirage）。
 > **布局变更**：2026-10 起本地数据目录从 `graphs/okf/` 移到仓库根 `knowledge/`（`okf.dir: knowledge`），
 > 本文正文里的 `graphs/okf/` 指同一处；S3 前缀仍是 `okf/`，不用重传。
 

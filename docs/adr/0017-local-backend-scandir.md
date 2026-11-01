@@ -112,9 +112,11 @@ cProfile（5 s 样本，同一次 glob）给出唯一答案：
 **什么时候该换成 FS 之外的方案**：空间内容挪到对象存储后（ADR-0016 的 `s3` 后端读的是
 本地镜像，所以本类仍然适用）；若哪天直接对 S3 做 glob，这里的 scandir 假设不再成立。
 
-**接入状态（2026-10-31）**：**暂不接生产**。`graphs/access/backend.py` 的 `SpaceBackend` 与
-`graphs/supervisor.py` 保持原样，本类目前只被基准脚本与 `tests/unit/test_local_backend.py` 使用。
-要启用时最省事的一步是让 `SpaceBackend` 继承 `LocalBackend`（ACL 逻辑不动），代价是多一层继承。
+**接入状态（2026-10-31 初版 / 2026-11-01 更新）**：初版**暂不接生产**；现在 `LocalBackend`
+已在**单机模式**下接管 `/uploads/`（`graphs/access/uploads_backend.py`，`uploads.store: fs` 时
+`filesystem_backend()` 把它挂在 `CompositeBackend` 的 `/uploads/` 路由上，`allow_write=False`）。
+空间知识（`/`）仍走 `SpaceBackend`：本类的 scandir 假设在对象存储上不成立，那是 Mirage 的活
+（ADR-0018）。ACL 仍由 `SpaceBackend` 的 `SpaceGuard` 负责，本类只管“读写落盘”这一层。
 
 ## 怎么验证（本地）
 

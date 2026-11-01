@@ -265,7 +265,7 @@ Every key in detail, the startup-time error messages, the graph-key / `assistant
 
 ### Environment Variables (`.env`)
 
-Loaded once at import; real environment variables take precedence over the file, so the same `.env` works in Docker/K8s with a few keys overridden. Configuration comes from three places: aegra's own settings in `src/aegra_api/settings.py` (env only), this project's **non-secret** knobs in [`config.yaml`](config.yaml) (read by `shared/config.py`, env override allowed), and **secrets** in `.env` (JWT_SECRET, PASSWORD_PEPPER, SESSION_SCOPE_SECRET, S3 credentials, OPENAI_API_KEY). A commented starting point is [`.env_example`](.env_example) (A native / B secrets / C third-party); the full reference (server, PostgreSQL, pools, Redis/workers, cron, retention, logging, OpenTelemetry, metrics) is in [docs/configuration.md](docs/configuration.md).
+Loaded once at import; real environment variables take precedence over the file, so the same `.env` works in Docker/K8s with a few keys overridden. Configuration comes from three places: aegra's own settings in `src/aegra_api/settings.py` (env only), this project's **non-secret** knobs in [`config.yaml`](config.yaml) (read by `shared/config.py`, env override allowed), and **secrets** in `.env` (JWT_SECRET, PASSWORD_PEPPER, S3 credentials, OPENAI_API_KEY). A commented starting point is [`.env_example`](.env_example) (A native / B secrets / C third-party); the full reference (server, PostgreSQL, pools, Redis/workers, cron, retention, logging, OpenTelemetry, metrics) is in [docs/configuration.md](docs/configuration.md).
 
 ```bash
 # --- Server ---
@@ -420,22 +420,24 @@ aegra-api/
 ├── custom/               # HTTP surface for this deployment
 │   ├── app.py            # FastAPI app (aegra.json http.app)
 │   ├── middleware/       # auth handler
-│   ├── api/              # one file per URL domain (account/spaces/graphs/tasks/delivery)
-│   ├── service/          # business logic (account, quota, outbox dispatcher)
+│   ├── api/              # one file per URL domain (account/spaces/graphs/tasks/delivery/uploads)
+│   ├── service/          # business logic (account, quota, uploads, outbox dispatcher)
 │   └── db/               # ORM models + repositories
 ├── graphs/               # graph surface (runs only inside a run)
 │   ├── supervisor.py     # main agent graph (aegra.json graphs.supervisor)
 │   ├── space_agent.py    # per-space subagent graph (aegra.json graphs.domain_agent)
+│   ├── xlsx_agent.py     # generic spreadsheet subagent (aegra.json graphs.xlsx_agent)
 │   ├── middleware/       # AsyncTaskGuard
-│   ├── access/           # space allow-list, ACL filesystem backend
+│   ├── access/           # space allow-list, ACL backend, LocalBackend, Mirage workspace pool
 │   ├── tools/            # xlsx (info/query/search/profile) + ask_user_question
 │   └── prompts/
 ├── shared/               # used by both sides; imports no framework
 │   ├── config.py         # config.yaml singleton
 │   ├── token.py          # JWT minting (user + service identity)
+│   ├── lifecycle.py      # shutdown hooks (lifespan closes the Mirage pool)
 │   ├── outbox.py         # delivery message format
-│   ├── session/          # LangGraph Store namespace + S3 blobs
-│   └── knowledge/        # knowledge root (local|s3) + AGENT.md parsing
+│   ├── session/          # upload store (bytes), upload routing rule, Store namespace
+│   └── knowledge/        # knowledge root (local|s3|s3fs) + AGENT.md parsing
 ├── knowledge/            # space content (data, not code)
 ├── tests/                # pytest (unit / integration / e2e)
 ├── web/                  # Vue 3 frontend
@@ -452,6 +454,8 @@ aegra-api/
 
 - **启动指南 / Getting started (中文)**: [README_zh.md](README_zh.md) — 环境依赖、`.env`、建表、初始化账号与知识空间、前后端启动、排错
 - Configuration reference (aegra.json, config.yaml, environment variables, logging): [docs/configuration.md](docs/configuration.md) (Chinese)
+- Object storage / single-machine storage, prefixes and cleanup: [docs/S3.md](docs/S3.md) (Chinese)
+- Architecture decision records (16 across 4 areas): [docs/adr/README.md](docs/adr/README.md) (Chinese)
 - Async subagent (ACP) design: [docs/design.md](docs/design.md)
 - Streaming reference (stream modes, sub-agent stream proxy): [docs/streaming.md](docs/streaming.md) (Chinese)
 - Frontend API contract (custom endpoints, SSE frames, interrupt/resume): [docs/frontend-api.md](docs/frontend-api.md) (Chinese)

@@ -12,10 +12,12 @@
 - **后端**：自托管的 Agent Protocol 服务（`src/aegra_api`），在 `aegra.json` 里注册图。
 - **图**（`graphs/`）：
   - `supervisor` — 主 agent，负责理解意图、拆清单、把活派给领域子 agent；
-  - `supervisor` + `domain_agent` — 主 agent 与**唯一一个**领域子 agent 图；后者按 run config 里的 space 现读 prompt，所以用户有几个空间就有几个子 agent（不用改代码）。
+  - `supervisor` + `domain_agent` — 主 agent 与**唯一一个**领域子 agent 图；后者按 run config 里的 space 现读 prompt，所以用户有几个空间就有几个子 agent（不用改代码）；
+  - `xlsx_agent` — 通用表格子 agent：读 `/uploads` 里不属于任何空间的表（主 agent 自己没有表格工具）。
+- **上传文件**：`POST /custom/uploads` 把文件挂到**当前会话**的 `/uploads`（md 归主 agent 自己读，xlsx 在派活时转给对应子 agent）。字节存哪儿由 `uploads.store` 决定：单机默认 `fs`（本机 `data/uploads/`），多副本用 `s3`（对象存储）。
 - **知识空间**：`knowledge/<空间名>/`，每个空间是一份 OKF（Markdown + YAML frontmatter，可带 xlsx 表格）。
 - **前端**（`web/`）：Vue 3 + Vite，左边会话、中间对话、右边面板（子任务实时进度 / 知识库文件树 / 定时任务）。
-- **代码布局**：`custom/`（HTTP 面：`app.py` + `middleware/ api/ service/ db/`）、`graphs/`（图面：入口 `supervisor.py` / `space_agent.py` + `middleware/ access/ tools/ prompts/`）、`shared/`（两侧共用的纯逻辑：`config token outbox session/ knowledge/`），`knowledge/` 只放数据。依赖单向：两个包都只依赖 `shared/`，互不 import。详见 [`CONTEXT.md`](./CONTEXT.md) 的「代码布局」。
+- **代码布局**：`custom/`（HTTP 面：`app.py` + `middleware/ api/ service/ db/`）、`graphs/`（图面：入口 `supervisor.py` / `space_agent.py` / `xlsx_agent.py` + `middleware/ access/ tools/ prompts/`）、`shared/`（两侧共用的纯逻辑：`config token lifecycle outbox session/ knowledge/`），`knowledge/` 只放数据。依赖单向：两个包都只依赖 `shared/`，互不 import。详见 [`CONTEXT.md`](./CONTEXT.md) 的「代码布局」。
 
 ---
 
@@ -47,7 +49,7 @@ cp .env_example .env
 | 文件 | 放什么 |
 |---|---|
 | `.env` | aegra 原生运行参数（数据库、端口、日志…）+ **密钥** + 第三方模型 key |
-| `config.yaml` | 本项目新增的非密钥参数（会话配额、文件上限、对象存储地址、知识空间）—— 已有默认值，不改也能跑 |
+| `config.yaml` | 本项目新增的非密钥参数（会话配额、单个文件上限、上传介质、对象存储地址、知识空间）—— 已有默认值，不改也能跑 |
 
 `.env` 至少改这几项：
 
@@ -68,7 +70,7 @@ AEGRA_CONFIG=aegra.json
 # 生成：python -c "import secrets;print(secrets.token_urlsafe(48))"
 JWT_SECRET=换成长随机串
 PASSWORD_PEPPER=换成长随机串
-SESSION_SCOPE_SECRET=换成长随机串     # 子 agent 读会话文件用
+# （旧版还有 SESSION_SCOPE_SECRET：上传重建后已不再读取，可删）
 
 # --- C. 第三方：模型（OpenAI 兼容接口，graphs/model.py 读取） ---
 OPENAI_API_KEY=sk-...
@@ -265,6 +267,8 @@ cd web && node scripts/smoke.mjs      # 20 个断言：登录→建会话→流�
 | 启动报 Redis 连接失败 / `RuntimeError: Redis not initialized` | `.env` 开了 `REDIS_BROKER_ENABLED=true` 但 Redis 没起：按 §6.2 启动（`docker start redis6`），或把该开关设回 `false` 并只用单进程启动 |
 | 取消后 run 还在继续跑 | 多进程启动但没开 Redis：取消信号跨不了进程（ADR-0009）。开 Redis 或改单进程 |
 | 建会话报 403「会话数已达上限」 | 每个账号默认最多 50 个会话（`config.yaml` 的 `quota.max_threads_per_user`，ADR-0012；**含子线程**，一个会话派 3~5 个子任务就要吃掉 3~5 个名额）；删掉不用的会话即可，删会话会连带删它的子线程 |
+| 上传返回 503「上传存储暂不可用」 | `uploads.store` 是 `s3` 但 `s3.endpoint` 没配 / 对象存储没起。单机把它设成 `fs`（或留 `auto` 且不配 endpoint） |
+| 上传成功但 agent 说 `/uploads` 是空的 | `okf.backend: s3fs` 只能配 `uploads.store: s3`（启动时 `uploads.validate()` 会报错）；另外确认问的是**同一条会话**，`/uploads` 按会话隔离 |
 
 ---
 
@@ -437,11 +441,12 @@ knowledge/bio-lab/
 ```
 
 **有 `.xlsx` 才会装 xlsx 四件套**（`xlsx_info/query/search/profile` + CodeInterpreterMiddleware），
-纯文档空间自动不装。
+纯文档空间自动不装。表在**第一次查询时**解析成 Parquet（`xlsx.cache_dir`），之后走 DuckDB。
 
-> 空间知识也可以放对象存储（`config.yaml` 的 `okf.backend: s3`，多副本读到同一份）：改完跑
-> `scripts/okf_push_s3.py`，各副本跑 `scripts/okf_pull_s3.py`。全部配置与上传方式见
-> [docs/S3.md](./docs/S3.md)。
+> 空间知识也可以放对象存储（多副本读同一份，`config.yaml` 的 `okf.backend`）：
+> `s3` = 每个副本拉一份本地镜像（改完跑 `scripts/okf_push_s3.py`，各副本跑
+> `scripts/okf_pull_s3.py`）；`s3fs` = Mirage 直读、不拉镜像。全部配置见
+> [docs/S3.md](./docs/S3.md)；两种模式与单机模式的对照见 [docs/S3.md §0.1](./docs/S3.md)。
 
 ### 11.4 验证（不用重启）
 
@@ -453,7 +458,7 @@ d, p = load_agent_spec('bio-lab'); print(has_tables('bio-lab'), d[:40], len(p))"
 ```
 
 名单是**每次 run 现算**的，所以下一次对话就能派给它；正在跑的 run 看不到新空间。
-`/custom/graphs` 里永远只有 `supervisor` 与 `domain_agent` 两个图——空间不再是一个 graph key。
+`/custom/graphs` 里永远只有三个图：`supervisor`、`domain_agent`、`xlsx_agent`——空间不再是一个 graph key。
 
 ### 11.10 不用手写的东西
 

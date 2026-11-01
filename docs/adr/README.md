@@ -20,9 +20,9 @@
 | [0011](./0011-space-agent-is-dynamic.md) | 空间子 agent 动态化 | 一个 `domain_agent` 图服务所有 space，名单每次 run 现算，加空间不改代码 | `graphs/supervisor.py`、`graphs/space_agent.py`、`shared/knowledge/spec.py` |
 | [0012](./0012-thread-quota-replaces-task-limit.md) | thread 配额取代派活上限 | 限的是"账号能有几个会话"（子线程计入所属主管），不是并发算力 | `custom/service/quota.py`、`custom/middleware/auth.py` |
 | [0014](./0014-no-hitl-for-eval.md) | 不做 eval 的 HITL 审批 | 子任务只支持取消与状态通知；取消不占发件箱行、不唤醒主管 | `custom/api/tasks.py`、`graphs/middleware/async_task_guard.py` |
-| [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3` 二选一，`s3` 读本地镜像（不重写 14 个 backend 方法） | `shared/knowledge/root.py`、`scripts/okf_{push,pull}_s3.py` |
+| [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3\|s3fs` 三选一：`s3` 读本地镜像（不重写 14 个 backend 方法），`s3fs` 由 Mirage 直读（ADR-0018） | `shared/knowledge/root.py`、`scripts/okf_{push,pull}_s3.py` |
 | [0017](./0017-local-backend-scandir.md) | 本地 backend 一趟 scandir | 每次调用只 `resolve` 一次、`os.scandir` 枚举、不跟符号链接；`glob` 快 50×、`grep` 仍交给 ripgrep | `graphs/access/local_backend.py` |
-| [0018](./0018-uploads-and-reads-through-mirage.md) | 上传重建：对象存储是唯一真相，读路径全走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 两个前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；上传仍 boto3 直写，台账只做归属与 `target_agent` | `graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
+| [0018](./0018-uploads-and-reads-through-mirage.md) | 上传重建：字节与读路径都可切，集群走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；表格解析一次存 Parquet 走 DuckDB；**单机可用 `uploads.store: fs` + `LocalBackend`，不需要对象存储**（§9） | `graphs/access/mirage_backend.py`、`graphs/access/uploads_backend.py`、`shared/session/uploads.py`、`graphs/xlsx_agent.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
 
 ## 已归档（6）
 
@@ -43,6 +43,7 @@
 | 子任务结果怎么回到主管、为什么不会投两次 | 0010（+ 0014 讲"取消不是结果"） |
 | 前端怎么看子任务进度、为什么不能直连 | 0007（+ 0014） |
 | 空间知识放哪、多副本怎么读同一份 | 0016 |
-| 上传文件放哪、agent 怎么读、谁能看见谁 | 0018 |
+| 上传文件放哪、agent 怎么读、谁能看见谁 | 0018（§9 讲单机本地模式） |
+| 表格怎么查、为什么不用 SQLite | 0018 §8 |
 | 账号能开多少会话 | 0012 |
 | 部署成多副本要注意什么 | [`../configuration.md`](../configuration.md) §3.1（原 0009） |

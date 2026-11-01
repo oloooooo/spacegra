@@ -51,7 +51,8 @@ POST /custom/login
 ```
 
 `graph_id` 可以直接当 `assistant_id` 用（见 `CONTEXT.md` 的 Graph key 词条）。
-现在只有两个图：所有领域子 agent 共用 `domain_agent`，space 经 run config 绑定（ADR-0011）。
+现在有三个图：所有领域子 agent 共用 `domain_agent`，space 经 run config 绑定（ADR-0011）；
+表格类扩展用 `xlsx_agent`（不绑 space，只看本会话的 `/uploads`，ADR-0018）。
 
 ### 3.2 `GET /custom/spaces`
 
@@ -119,9 +120,10 @@ event: end        data: {"status": "success"}
 
 ### 3.7 `POST /custom/uploads`
 
-上传一个文件到当前会话（`multipart/form-data`，字段 `file` + `thread_id`）。
-字节进对象存储的 `uploads/<上传者>/<会话>/<文件名>`，同名即覆盖；台账行记归属与投递目标
-（ADR-0018）。只能往自己的会话传：线程不存在 404、不是自己的 403。
+上传一个文件到当前会话（`multipart/form-data`，字段 `file` + `thread_id`）。同名即覆盖；
+字节落点由 `uploads.store` 决定：`s3` → 对象存储 `uploads/<上传者>/<会话>/<文件名>`，
+`fs` → 本机 `data/uploads/<上传者>/<会话>/<文件名>`（单机默认）。台账行记归属与投递目标（ADR-0018）。
+只能往自己的会话传：线程不存在 404、不是自己的 403。
 
 ```json
 {
@@ -137,8 +139,9 @@ event: end        data: {"status": "success"}
   其他 xlsx（含写了别的空间名、你却没有权限的）→ 通用 `xlsx` 子 agent；md 等 → 主 agent 自己读。
 - 错误码：`413` 单文件超上限（表格按 `xlsx.max_blob_mb`，其余按 `session_files.max_upload_mb`）、
   `409` 会话文件数超 `session_files.max_files_per_session`、`422` 文件名带路径分隔符、
-  `503` 对象存储不可用。
-- 上传后 agent 不需要刷新：它的文件系统就是对象存储，下次 `ls /uploads` 就能看见。
+  `503` 上传存储不可用（对象存储挂了 / bucket 不可写）。
+- 上传后 agent 不需要刷新：`s3fs` 模式下它的文件系统就是对象存储，`fs` 模式下
+  `/uploads/` 挂的就是那个目录，下次 `ls /uploads` 就能看见。
 
 ## 4. 直接用的原生接口
 
@@ -255,6 +258,7 @@ POST /threads/{thread_id}/runs/crons
 
 - 代理接口是**单次 Run 订阅**：子 agent 若被 `update_async_task` 再跑一轮，前端要按新的 `run_id` 重新连。
 - `service_token()` 是 10 年期长期 token（沿用 ADR-0004 的 shortcut），只在服务端使用，不下发浏览器。
-- 没有把文件写进 Space 的接口：空间知识只能手工放盘 / `scripts/okf_push_s3.py`（见 [S3.md](./S3.md)）。
-  文件上传接口（原 §3.7/§3.8）已从 main 移除。
+- 没有把文件写进 Space 的接口：上传只能进**会话私有**的 `/uploads`，空间知识仍只能手工放盘 /
+  `scripts/okf_push_s3.py`（见 [S3.md](./S3.md)）。agent 侧一律只读（`LocalBackend`
+  `allow_write=False`、Mirage `MountMode.READ`）。
 - 没有 refresh token。

@@ -326,23 +326,24 @@ checkpoint），而启动日志里**没有任何告警**。
 >
 > 所以：改 `access_token_ttl` 只会变用户的登录频率，子 agent 照常跑；反过来想“让服务 token 失效”只能改 `JWT_SECRET`（代价：所有用户 token 同时失效）。
 
-#### 会话文件 md（`shared/session/store.py`）
+#### 会话文件配额（`custom/service/uploads.py`、`shared/session/store.py`）
 
-md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键只剩底座在模块导入时读取（保留给后续分支）。
+由上传入口读；`store.py` 仍在模块导入时读一遍（底座保留）。上传文件不设 TTL：
+删会话时台账行 CASCADE，字节由 `scripts/reap_upload_orphans.py` 按 24h 窗口收。
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `session_files.max_upload_mb` | `10` | `MAX_UPLOAD_MB` | md 单文件上限（当前无入口） |
-| `session_files.max_files_per_session` | `50` | `MAX_FILES_PER_SESSION` | md 每会话文件数 |
-| `session_files.upload_ttl_minutes` | `4320`（72h） | `UPLOAD_TTL_MINUTES` | md 的孤儿保留期，语义是「最后读取后多久」 |
+| `session_files.max_upload_mb` | `10` | `MAX_UPLOAD_MB` | 非 xlsx 上传（md 等）的单文件上限；xlsx 看 `xlsx.max_blob_mb` |
+| `session_files.max_files_per_session` | `50` | `MAX_FILES_PER_SESSION` | 每个会话能挂几个文件（超了 `409`） |
+| `session_files.upload_ttl_minutes` | `4320`（72h） | `UPLOAD_TTL_MINUTES` | ⚠ **当前代码没读这个键**（靠删会话 + 清理脚本，不靠 TTL） |
 
 #### xlsx 工具（`graphs/tools/xlsx/`）
 
-把知识空间里的存量 xlsx 第一次被查时解析成 Parquet，再交给 DuckDB 查（`xlsx_info/query/search/profile`）。上传相关的三个键（`max_blob_mb`、`max_xlsx_files_per_session`、`max_blob_mb_per_user`）现在**无人读**，仅为兼容保留。
+把 xlsx 第一次被查时解析成 Parquet，再交给 DuckDB 查（`xlsx_info/query/search/profile`）。`max_blob_mb` 是上传入口的单文件上限；`max_xlsx_files_per_session` 与 `max_blob_mb_per_user` 仍**无人读**，仅为兼容保留。
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `xlsx.max_blob_mb` | `10` | `MAX_BLOB_MB` | xlsx 单文件上限（当前无入口） |
+| `xlsx.max_blob_mb` | `10` | `MAX_BLOB_MB` | xlsx 单文件的 HTTP 上传上限（超了 `413`） |
 | `xlsx.max_cells` | `2000000` | `MAX_CELLS` | 表结构硬闸；超了第一次调工具就报错，不静默截断 |
 | `xlsx.max_xlsx_files_per_session` | `20` | `MAX_XLSX_FILES_PER_SESSION` | 每会话 xlsx 个数（当前无入口） |
 | `xlsx.max_md_files_per_session` | `10` | `MAX_MD_FILES_PER_SESSION` | ⚠ **当前代码没读这个键**，改它不生效 |
@@ -376,10 +377,22 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `okf.backend` | `local` | `OKF_BACKEND` | `local` 直接读 `graphs/<okf.dir>`；`s3` 读本地镜像 |
+| `okf.backend` | `local` | `OKF_BACKEND` | `local` 直读 `knowledge/`；`s3` 读本地镜像；`s3fs` 每 run 建 Mirage Workspace 直读对象存储（ADR-0018，此模式下 `/uploads` 也强制落对象存储） |
 | `okf.dir` | `okf` | `OKF_DIR` | 空间根目录名（相对 `graphs/`） |
 | `okf.mirror_dir` | `.cache/okf` | `OKF_MIRROR_DIR` | `s3` 模式的镜像目录 |
 | `okf.mirror_ttl_seconds` | `0` | `OKF_MIRROR_TTL_SECONDS` | 镜像过期重拉的间隔；`0` = 只拉一次（改内容后手动跑 `scripts/okf_pull_s3.py`） |
+
+#### Mirage 虚拟文件系统（`graphs/access/mirage_backend.py`）
+
+只在 `okf.backend: s3fs` 时生效：每 run 一个 Workspace，挂 `/`（对象存储 `okf/`）与
+`/uploads`（本会话的上传目录），按 agent 用 profile 白名单收窄可见范围。
+本地模式不加载 Mirage（本地盘上它比 `LocalBackend` 慢）。
+
+| YAML 键 | 默认 | 覆盖变量 | 说明 |
+|---|---|---|---|
+| `mirage.redis_url` | 空 | `MIRAGE_REDIS_URL` | 空 = 进程内缓存；填了则 cache/index 进 Redis（多实例共用，需 redis>=6） |
+| `mirage.cache_limit` | `256MB` | `MIRAGE_CACHE_LIMIT` | 单个 Workspace 的文件缓存上限 |
+| `mirage.index_ttl_seconds` | `600` | `MIRAGE_INDEX_TTL_SECONDS` | 目录索引 TTL（秒） |
 
 #### 图（`graphs/supervisor.py`）
 

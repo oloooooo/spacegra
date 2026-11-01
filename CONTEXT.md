@@ -122,6 +122,22 @@ _Avoid_: 把它当成普通用户、把子 agent 当成终端用户本人
 删除 Space 不影响已派出任务：那些任务保留当时授权的 space，结果照常投递；新任务不会再选到它。
 _Avoid_: 把子 agent 的数量或名字写成固定值、把 prompt 写在代码里（它与文档同目录才有单一来源）
 
+**xlsx 子 agent（通用表格子 agent）**:
+名字固定是 `xlsx`，图是 `xlsx_agent`。主 agent **没有**表格工具：用户上传的 xlsx 要么按文件名前缀
+派给对应 space 子 agent，要么落到这里。它只看得见 `/uploads`，不挂任何空间知识。
+_Avoid_: 叫“表格 agent”（另有 space 子 agent 也能读表）、把它当成空间级实体（它不绑定 space）
+
+**上传文件（`/uploads`）**:
+agent 视角的虚拟目录，只含**本会话**上传的文件。归属键是 `(owner, thread)`，不是 space，
+因此不参与空间权限判定，也不写入知识空间；agent 侧一律只读。
+_Avoid_: 叫“会话文件目录”（容易与旧的 SessionFilesMiddleware 混）、把它当空间
+
+**Mirage Workspace**:
+只在 `okf.backend: s3fs` 时存在：每个会话一个虚拟文件系统容器，挂 `/`（对象存储 `okf/`）
+与 `/uploads`（本会话上传目录），每个 agent 用一份 profile 收窄可见范围（hide 根 + show 白名单）。
+按会话 TTL 池复用（8 个 / 5 分钟），进程退出时由 lifespan 统一关。
+_Avoid_: 把它当 Sandbox（它没有 `execute`）、把它当每 run 新建（那是被池取代的初版）
+
 **Async task（异步任务）**:
 主管经 `start_async_task` 派出的一个后台子 agent 执行。在主管 state 的 `async_tasks` 里登记，
 键是 `task_id`，值同时就是子执行所在的 thread id；`agent_name` 是当时的 space 名。
@@ -182,19 +198,23 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
 三个顶层包，依赖方向单向（由 `tests/unit/test_layout.py` 守护）：
 
 - `custom/` —— **HTTP 面**。`app.py` 装配（`aegra.json` 的 `http.app`）；
-  `api/` 只做 HTTP 形状（一个 URL 域一个文件）、`service/` 业务、`db/` ORM 与仓储、
-  `middleware/` 中间层（Auth handler）。
+  `api/` 只做 HTTP 形状（一个 URL 域一个文件，含 `uploads.py`）、`service/` 业务
+  （含 `uploads.py` 的配额与台账 upsert）、`db/` ORM 与仓储、`middleware/` 中间层（Auth handler）。
 - `graphs/` —— **图面**，只在 run 里跑。根目录只放 `aegra.json` 直指的入口
   （`supervisor.py`、`space_agent.py`、`xlsx_agent.py`）；`middleware/` 中间层（AgentMiddleware）、
-  `access/` 横切的访问判定（spaces 列表、带 ACL 的 backend、Mirage 后端与 Workspace 池）、
+  `access/` 横切的访问判定（spaces 列表、带 ACL 的 `SpaceBackend`、`LocalBackend`、
+  `/uploads` 路由、Mirage 后端与 Workspace 池），
   `tools/` 与 `prompts/`。
 - `shared/` —— **两侧共用的纯逻辑**：`config`（config.yaml 单例）、`token`（JWT 铸造）、
-  `outbox`（投递文本口径）、`session/`（Store 与对象存储底座、上传 key 布局与
-  上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
+  `lifecycle`（关闭钩子注册表，供 lifespan 收尾）、`outbox`（投递文本口径）、
+  `session/`（对象存储底座、**上传介质层 `uploads.py`**、上传路由规则 `upload_rule`、
+  Store 命名空间）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
-FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传读路径经 Mirage 在
-`graphs/access/mirage_backend.py`，上传写路径在 `custom/api/uploads.py`，规则见 ADR-0018。）
+FastAPI / LangChain / deepagents。目前**零例外**（旧的 `graphs → custom.service.session_files`
+懒加载、`custom → graphs` 的关池调用都已改成走 `shared`）。上传读路径：集群模式在
+`graphs/access/mirage_backend.py`，单机模式在 `graphs/access/uploads_backend.py`；
+写路径在 `custom/api/uploads.py` → `custom/service/uploads.py` → `shared/session/uploads.py`。
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。
 _Avoid_: 往 `graphs/` 里放数据；在 `custom/` 里放图侧要用的模块（要放就放 `shared/`）；

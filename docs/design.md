@@ -179,7 +179,16 @@ run 中途不轮询。投递判重是一次单行条件 UPDATE（发件箱表）
   `SELECT thread FOR UPDATE` + 活跃 run 检查来保证“空闲才建 run”（`custom/service/outbox_dispatcher.py`）。
   `POST /threads/{tid}` 的 `GET /threads/{tid}` 响应含 `status`（`idle` / `busy` / `interrupted` / `error`，
   `models/threads.py:98`），但分发者不再用它——那是“先查后建”的竞态写法。
-- **图文件**（方案变化过，以当前 `aegra.json` 为准）：现在只注册 `supervisor`（`./graphs/supervisor.py:graph`）与 `domain_agent`（`./graphs/space_agent.py:graph`）——两个都是工厂图：主管每次 run 按自己拥有的 spaces 现算子 agent 名单，子 agent 按 run config 里的 space 现读 `knowledge/<space>/AGENT.md`（ADR-0011）。旧的三张领域图与 `_DOMAIN_SPECS` 已删；`graphs/xlsx_process.py` 及备份 `graphs/xlsx_process copy.py` 也不再是活图。
+- **图文件**（方案变化过，以当前 `aegra.json` 为准）：现在注册三个工厂图：
+  `supervisor`（`./graphs/supervisor.py:graph`）、`domain_agent`（`./graphs/space_agent.py:graph`）、
+  `xlsx_agent`（`./graphs/xlsx_agent.py:graph`）——主管每次 run 按自己拥有的 spaces 现算子 agent 名单，
+  子 agent 按 run config 里的 space 现读 `knowledge/<space>/AGENT.md`（ADR-0011）；`xlsx_agent` 不绑 space，
+  只看本会话的 `/uploads`（主 agent 自身没有表格工具，ADR-0018）。旧的三张领域图与 `_DOMAIN_SPECS` 已删；
+  `graphs/xlsx_process.py` 及备份 `graphs/xlsx_process copy.py` 也不再是活图。
+- **每个 agent 一个 backend**（ADR-0018）：`supervisor_backend(config)` / `space_backend(config)` /
+  `xlsx_backend(config)` 都在各自的 `graph(config)` 里现建，单机（`okf.backend: local`）返回
+  `CompositeBackend(default=SpaceBackend, routes={"/uploads/": LocalBackend})`，集群（`s3fs`）返回
+  对应 Mirage `for_agent(workspace_for(...), agent)`。
 
 ## 3. 端点契约
 
