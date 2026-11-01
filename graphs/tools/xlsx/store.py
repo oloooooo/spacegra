@@ -61,8 +61,7 @@ def _same_size(path: Path, data: bytes) -> bool:
 def virtual_cache_path(vpath: str, data: bytes) -> Path:
     """s3fs 模式：把虚拟路径的字节落到本地缓存，返回本地路径。
 
-    文件名取内容哈希：同一张表重复下载不会让索引失效（`materialize` 的缓存键是
-    「路径 + mtime + size」），表改了才会换一个新文件名。
+    文件名取内容哈希：同一张表重复下载只会命中同一个文件，表改了才会换名字。
     """
     digest = hashlib.sha256(data).hexdigest()[:16]
     target = cache_dir() / "vpath" / f"{digest}{Path(vpath).suffix or '.bin'}"
@@ -95,11 +94,3 @@ def resolve_local(path: str | Path) -> Path:
 
 def display_name(path: str | Path) -> str:
     return str(path).rstrip("/\\").rsplit("/", 1)[-1]
-
-
-def materialize(path: str | Path) -> tuple[Path, str]:
-    """返回 (本地 xlsx, 索引缓存键)。"""
-    local = resolve_local(path)
-    stat = local.stat()
-    # 空间文件可能被手工改过：mtime+size 一起进键，改了就换索引
-    return local, f"local-{local.parent.name}-{local.name}-{int(stat.st_mtime)}-{stat.st_size}"

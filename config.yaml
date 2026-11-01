@@ -39,13 +39,11 @@ xlsx:
   max_xlsx_files_per_session: 20  # 当前无入口，保留
   max_md_files_per_session: 10   # 未生效：md 个数上限走 session_files.max_files_per_session
   max_blob_mb_per_user: 2048    # 每用户二进制总量（2GB）；当前无入口，保留
-  cache_dir: .cache/xlsx        # 索引与字节的本机缓存，必须在 okf.dir（knowledge/）之外
-  cache_ttl_days: 7
+  cache_dir: .cache/xlsx        # 派生缓存与下载字节的本机目录，必须在 okf.dir（knowledge/）之外
   query_budget_ms: 5000         # 单次 where 查询的 CPU 预算，超了 interrupt()
-  # 大表（>= cache_min_cells）第一次被查时转成每 sheet 一个 Parquet，之后走 DuckDB。
-  cache_mode: local             # local = 只落本机；s3 = 多实例共享（对象存储 <cache_prefix>/<sha256>/）；off = 退回 SQLite 索引
-  cache_prefix: xlsx-derived    # cache_mode=s3 时对象存储里的前缀（内容寻址，可随时清）
-  cache_min_cells: 20000        # 格子数（行×列，所有 sheet 累加）低于这个值不转 Parquet
+  # 表第一次被查时按 sheet 转成 Parquet（内容哈希 + header 决定目录），之后走 DuckDB。
+  cache_mode: local             # local = 只落本机；s3 = 同时写对象存储供多实例共享（<cache_prefix>/<sha256>/h<header>/）
+  cache_prefix: xlsx-derived    # cache_mode=s3 时的对象前缀（内容寻址，可随时清）
   cache_local_max_mb: 2048      # 本机派生缓存的总预算，超了按最久未改动淘汰
 
 # --- 对象存储（shared/session/blobs.py，ADR-0016）---

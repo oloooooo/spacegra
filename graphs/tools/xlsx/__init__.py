@@ -1,7 +1,9 @@
 """xlsx 域：info / query / search / profile 四个只读工具 + 共享 schema。
 
-- 路径以 ``/`` 开头当虚拟路径：``/空间名/x.xlsx`` 是知识空间里的存量文件（本地盘）。
-  读不到时直接落到本地文件，再走同一套 SQLite 索引，所以四个工具的实现只有一份。
+- 路径以 ``/`` 开头当虚拟路径：``/空间名/x.xlsx`` 是知识空间里的存量文件（本地盘），
+  Mirage 模式下 ``/uploads/x.xlsx`` 是本会话的上传文件（字节从对象存储取）。
+- 不管哪种模式，工具都只拿「本地可读的一份字节」：解析一次 → 按 sheet 存 Parquet
+  （`duck.py`，内容哈希 + header 决定目录）→ 之后所有查询走 DuckDB `read_parquet`。
 - pandas 是同步库，tool 统一 ``async def`` + ``asyncio.to_thread`` 跑同步实现，不卡事件循环；
 - 每个 tool 注入 ``runtime: ToolRuntime``，``_run`` 统一用 ``stream_writer`` 打
   start/done/error 关键消息（调用方要开 ``custom`` 流模式才收得到）；
@@ -14,23 +16,19 @@ agent 视角::
     xlsx_search(path, keyword="ABC")                  # 全表撒网找关键词，返回 sheet/行/列
     xlsx_profile(path)                                # 空值/重复/类型/数值范围画像
 
-索引为什么必要：80k×10×3 的表现在一次全读 41.7 s，建好索引后 `WHERE … LIMIT 200` 是 2 ms。
-
-两条读路径（ADR-0018 §8）：格子数 ≥ `xlsx.cache_min_cells` 的表第一次被查时按 sheet
-转成 Parquet（`duck.py`，介质由 `xlsx.cache_mode` 定 local/s3），之后走 DuckDB `read_parquet`；
-小表与 `cache_mode: off` 走本文的 SQLite 索引。对外四个工具的行为一致。
+为什么必须先物化：80k×10×3 的表现在一次全读 41.7 s，转成列式文件后 `WHERE … LIMIT 200`
+是 2 ms。派生缓存放本机还是对象存储（多实例共享）由 `xlsx.cache_mode` 决定；它是
+可重建的中间产物，不是真相——删了只会让下次查询多解析一遍（ADR-0018 §8）。
 """
 
 import asyncio
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
 from graphs.access.spaces import allowed_spaces
-from graphs.tools.xlsx import duck, index, store
+from graphs.tools.xlsx import duck, store
 from graphs.tools.xlsx.schema import (
     XlsxHeader,
     XlsxInfoArgs,
@@ -108,74 +106,31 @@ async def _local_copy(path: str, runtime: ToolRuntime) -> str:
     return str(store.virtual_cache_path(path, data))
 
 
-def _conn(path: str, header: int) -> sqlite3.Connection:
-    """本地 xlsx → 索引 → 只读连接（同步，跑在线程池里）。"""
-    xlsx, cache_key = store.materialize(path)
-    return index.open_ro(index.ensure(xlsx, store.cache_dir(), cache_key, header))
-
-
-async def _derived(local: str, header: int) -> str | None:
-    """小表不值得转 Parquet（解析本身就要一秒级），直接走老索引。
-
-    行数阈值用 openpyxl read_only 探（`index.cell_count`，实测 27 ms），不读整表。
-    """
-    if header:
-        return None
-    if duck.cache_mode() == "off":
-        return None
-    cells = await asyncio.to_thread(index.cell_count, Path(local))
-    if cells < int(app_config.get("xlsx.cache_min_cells")):
-        return None
-    return await duck.ensure(Path(local))
-
-
 # ---------- 同步实现（跑在线程池里） ----------
 
 
-def _info(local: str, display: str, sha256: str | None, sheet: str | None, header: int) -> str:
-    if sha256:
-        return duck.info(sha256, sheet)
-    with closing(_conn(local, header)) as conn:
-        return index.info(conn, display, sheet)
+def _info(sha256: str, header: int, sheet: str | None) -> str:
+    return duck.info(sha256, sheet, header)
 
 
 def _query(
-    local: str,
-    _display: str,
-    sha256: str | None,
-    sheet: str | None,
+    sha256: str,
     header: int,
+    sheet: str | None,
     columns: list[str] | None,
     where: str | None,
     limit: int,
     offset: int,
 ) -> str:
-    if sha256:
-        return duck.query(sha256, sheet, where, columns, limit, offset)
-    with closing(_conn(local, header)) as conn:
-        return index.query(conn, sheet, columns, where, limit, offset)
+    return duck.query(sha256, sheet, where, columns, limit, offset, header)
 
 
-def _search(
-    local: str,
-    _display: str,
-    sha256: str | None,
-    keyword: str,
-    sheet: str | None,
-    header: int,
-    limit: int,
-) -> str:
-    if sha256:
-        return duck.search(sha256, keyword, sheet, limit)
-    with closing(_conn(local, header)) as conn:
-        return index.search(conn, keyword, sheet, header, limit)
+def _search(sha256: str, header: int, keyword: str, sheet: str | None, limit: int) -> str:
+    return duck.search(sha256, keyword, sheet, limit, header)
 
 
-def _profile(local: str, _display: str, sha256: str | None, sheet: str | None, header: int) -> str:
-    if sha256:
-        return duck.profile(sha256, sheet)
-    with closing(_conn(local, header)) as conn:
-        return index.profile(conn, sheet)
+def _profile(sha256: str, header: int, sheet: str | None) -> str:
+    return duck.profile(sha256, sheet, header)
 
 
 # ---------- 异步 tool（agent 用这一层） ----------
@@ -188,8 +143,10 @@ async def _run(name: str, fn: Any, runtime: ToolRuntime, /, path: str, header: i
     try:
         _check_scope(path, runtime.config)
         local = await _local_copy(path, runtime)
-        derived = await _derived(local, header)
-        result = await asyncio.to_thread(fn, local, str(path), derived, *args)
+        sha256 = await duck.ensure(Path(local), header)
+        if sha256 is None:
+            return f"错误：这张表太大（超过 xlsx.max_cells={app_config.get('xlsx.max_cells')}），无法解析成可查询的形式"
+        result = await asyncio.to_thread(fn, sha256, header, *args)
     except Exception as e:  # noqa: BLE001 —— 故意兜底，错误信息是给 agent 看的
         writer({"tool": name, "event": "error", "error": f"{type(e).__name__}: {e}"})
         return f"错误：{type(e).__name__}: {e}"

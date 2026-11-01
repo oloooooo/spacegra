@@ -2,13 +2,12 @@
 
 为什么要有这一层
 ----------------
-xlsx 是 zip 压缩的 XML，每次查都要重新解压解析。仓库里的老路径（`index.py`）在
-**80k×10×3** 的表演上量过：一次全读 **41.7 s / 129 MB**，建好索引后 `WHERE … LIMIT 200`
-是 **2 ms**。索引已经解决了"重复查"，但仍有三个结构性问题：
+xlsx 是 zip 压缩的 XML，每次查都要重新解压解析：**80k×10×3** 的表演上一次全读
+**41.7 s / 129 MB**，解析一次存成列式文件后 `WHERE … LIMIT 200` 是 **2 ms**。
 
-1. 建索引本身是一次全解析（40 s 级），且每个 sheet 一份 SQLite 文件；
-2. 索引键是「路径 + mtime + size」（`store.materialize`），跨机器不通用；
-3. 只剩 SQLite 一种执行器，跨表/跨 sheet 的 join 要手工搬数据。
+早先的实现用 SQLite 建索引（本分支已删除），三个结构性问题：索引键是「路径 +
+mtime + size」，跨机器不通用；SQLite 依赖文件锁语义，`cache_dir` 一旦指向共享卷
+就不再成立；只剩一种执行器，跨表/跨 sheet 的 join 要手工搬数据。
 
 这一层改用 parquet 当中间产物：**按内容哈希（sha256）命名** → 同一个文件在任何
 实例、任何机器上解析结果都一样，可以直接共享；查询用 DuckDB（`read_parquet`，
@@ -18,11 +17,16 @@ xlsx 是 zip 压缩的 XML，每次查都要重新解压解析。仓库里的老
 -----------------------------
 ``local`` 只落本机缓存目录（单实例部署，最省事）；
 ``s3``    同时写对象存储，任何实例先查本地、未命中再拉远端（多实例/弹性伸缩）；
-``off``   不用这一层，退回 `index.py` 的 SQLite 索引。
+没有 ``off``：不建缓存意味着每次查询重新解析（80k 行级 40 s），这不是一个
+能交给运维去切的旋钮。
 
 多实例并发的两条护栏：派生文件按内容哈希命名（内容确定，谁写都一样），落盘用
 `store.write_atomic`（临时文件 + rename，读者看不到半截 Parquet）。清单
 （manifest）最后写，看到清单就意味着 parquet 已经完整。
+
+`header`（表头在第 N 行）是缓存键的一部分：`<sha256>/h<header>/`。不同 header 各存
+一份，常见情况只有 h0 一份。这件事以前由 SQLite 路径的「跳行」逻辑处理，现在
+`pd.read_excel(header=...)` 在解析时一次做掉，四个工具不再分叉。
 """
 
 from __future__ import annotations
@@ -61,17 +65,11 @@ _FORBIDDEN_SQL = re.compile(
 
 
 def cache_mode() -> str:
-    """``local`` | ``s3`` | ``off``；s3 未配置对象存储时自动退回 local。"""
+    """``local`` | ``s3``；s3 未配置对象存储时自动退回 local（配置写错不该全线报错）。"""
     mode = str(config.get("xlsx.cache_mode")).strip().lower() or "local"
-    if mode not in {"local", "s3", "off"}:
+    if mode != "s3":
         return "local"
-    if mode == "s3" and not blobs.configured():
-        return "local"
-    return mode
-
-
-def cache_enabled() -> bool:
-    return cache_mode() != "off"
+    return "s3" if blobs.configured() else "local"
 
 
 def _derived_dir() -> Path:
@@ -84,22 +82,27 @@ def _sheet_file(sheet: str) -> str:
     return f"{cleaned or 'sheet'}.parquet"
 
 
-def store_path(sha256: str, sheet: str) -> Path:
-    """本地派生文件位置：``<cache_dir>/derived/<sha256>/<sheet>.parquet``。"""
-    return _derived_dir() / sha256 / _sheet_file(sheet)
+def _relative(sha256: str, header: int) -> str:
+    """``<sha256>/h<header>``：表头行号进路径，不同 header 各存一份。"""
+    return f"{sha256}/h{int(header)}"
 
 
-def remote_key(sha256: str, sheet: str) -> str:
-    """对象存储里的位置：``<xlsx.cache_prefix>/<sha256>/<sheet>.parquet``（跨实例共享）。"""
-    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{sha256}/{_sheet_file(sheet)}"
+def store_path(sha256: str, sheet: str, header: int = 0) -> Path:
+    """本地派生文件位置：``<cache_dir>/derived/<sha256>/h<header>/<sheet>.parquet``。"""
+    return _derived_dir() / _relative(sha256, header) / _sheet_file(sheet)
 
 
-def _manifest_path(sha256: str) -> Path:
-    return _derived_dir() / sha256 / "manifest.json"
+def remote_key(sha256: str, sheet: str, header: int = 0) -> str:
+    """对象存储里的位置：``<xlsx.cache_prefix>/<sha256>/h<header>/<sheet>.parquet``。"""
+    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{_relative(sha256, header)}/{_sheet_file(sheet)}"
 
 
-def _remote_manifest_key(sha256: str) -> str:
-    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{sha256}/manifest.json"
+def _manifest_path(sha256: str, header: int = 0) -> Path:
+    return _derived_dir() / _relative(sha256, header) / "manifest.json"
+
+
+def _remote_manifest_key(sha256: str, header: int = 0) -> str:
+    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{_relative(sha256, header)}/manifest.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -129,13 +132,13 @@ def _connect():  # noqa: ANN202 —— duckdb 的类型在可选依赖里
     return con
 
 
-def _frames(source: Path) -> dict[str, Any]:
+def _frames(source: Path, header: int) -> dict[str, Any]:
     import pandas as pd
 
-    return pd.read_excel(source, sheet_name=None, engine="openpyxl")
+    return pd.read_excel(source, sheet_name=None, header=header, engine="openpyxl")
 
 
-async def ensure(source: Path) -> str | None:
+async def ensure(source: Path, header: int = 0) -> str | None:
     """算内容哈希 → 读/建派生缓存，返回 sha256（不可用则 None）。
 
     先看清单再看数据：清单命中就不用解析，跨实例也能直接复用（s3 模式下会从
@@ -144,9 +147,9 @@ async def ensure(source: Path) -> str | None:
     import asyncio
 
     sha256 = await asyncio.to_thread(sha256_file, source)
-    if reload_manifest(sha256) is not None:
+    if reload_manifest(sha256, header) is not None:
         return sha256
-    manifest = await asyncio.to_thread(build_derived, sha256, source)
+    manifest = await asyncio.to_thread(build_derived, sha256, source, header)
     return sha256 if manifest is not None else None
 
 
@@ -162,13 +165,13 @@ def _clean_columns(columns: Any) -> list[str]:
     return out
 
 
-def build_derived(sha256: str, source: Path) -> dict[str, Any] | None:
+def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] | None:
     """把 xlsx 的每个 sheet 转成一份 Parquet（同步，跑在线程池里）。
 
-    返回清单；数据规模超过 `xlsx.max_cells` 时返回 None——那类表交给老索引路径的
-    单元格上限与查询预算去拦，不在这里重复实现一遍。
+    返回清单；数据规模超过 `xlsx.max_cells` 时返回 None——那种表任何查询都会打满
+    CPU，调用方应当直接回一句"表太大"，而不是先落一份几 GB 的中间产物。
     """
-    frames = _frames(source)
+    frames = _frames(source, header)
     con = _connect()
     try:
         sheets: list[dict[str, Any]] = []
@@ -182,7 +185,7 @@ def build_derived(sha256: str, source: Path) -> dict[str, Any] | None:
                 return None
             frame = frame.copy()
             frame.columns = _clean_columns(frame.columns)  # type: ignore[assignment]
-            target = store_path(sha256, name)
+            target = store_path(sha256, name, header)
             con.register("staging", frame)
             try:
                 tmp = target.with_suffix(".parquet.tmp")
@@ -206,26 +209,27 @@ def build_derived(sha256: str, source: Path) -> dict[str, Any] | None:
         con.close()
 
     manifest = {
-        "version": 1,
+        "version": 2,
         "sha256": sha256,
+        "header": int(header),
         "engine": "duckdb",
         "sheets": sheets,
         "rows": sum(s["rows"] for s in sheets),
         "built_at": int(time.time()),
     }
-    store.write_atomic(_manifest_path(sha256), json.dumps(manifest, ensure_ascii=False).encode())
+    store.write_atomic(_manifest_path(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
     if cache_mode() == "s3":
         for sheet in sheets:
-            source_file = store_path(sha256, sheet["name"])
-            blobs.put_bytes(remote_key(sha256, sheet["name"]), source_file.read_bytes())
-        blobs.put_bytes(_remote_manifest_key(sha256), json.dumps(manifest, ensure_ascii=False).encode())
+            source_file = store_path(sha256, sheet["name"], header)
+            blobs.put_bytes(remote_key(sha256, sheet["name"], header), source_file.read_bytes())
+        blobs.put_bytes(_remote_manifest_key(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
     _enforce_size_limit()
     return manifest
 
 
-def reload_manifest(sha256: str) -> dict[str, Any] | None:
+def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
     """读清单。本地没有就看对象存储（多实例共享）；远端也没有就返回 None。"""
-    path = _manifest_path(sha256)
+    path = _manifest_path(sha256, header)
     if path.is_file():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -233,7 +237,7 @@ def reload_manifest(sha256: str) -> dict[str, Any] | None:
             return None
     if cache_mode() != "s3":
         return None
-    raw = blobs.get_or_none(_remote_manifest_key(sha256))
+    raw = blobs.get_or_none(_remote_manifest_key(sha256, header))
     if raw is None:
         return None
     try:
@@ -297,14 +301,14 @@ def _enforce_size_limit() -> None:
 # ---------- 取本地 parquet ----------
 
 
-def local_parquet(sha256: str, sheet: str) -> Path | None:
+def local_parquet(sha256: str, sheet: str, header: int = 0) -> Path | None:
     """本地有点就直接用；s3 模式下没有再去远端拉一份回来。"""
-    path = store_path(sha256, sheet)
+    path = store_path(sha256, sheet, header)
     if path.is_file():
         return path
     if cache_mode() != "s3":
         return None
-    raw = blobs.get_or_none(remote_key(sha256, sheet))
+    raw = blobs.get_or_none(remote_key(sha256, sheet, header))
     if raw is None:
         return None
     store.write_atomic(path, raw)
@@ -344,7 +348,7 @@ def _columns(con: Any, path: Path) -> list[str]:
 
 
 def _check_where(where: str) -> str:
-    """`where` 是模型写的 SQL 谓词：禁止多语句与 DDL/扩展加载（对齐 index.py 的策略）。"""
+    """`where` 是模型写的 SQL 谓词：禁止多语句与 DDL/扩展加载。"""
     text = where.strip().rstrip(";").strip()
     if ";" in text or _FORBIDDEN_SQL.search(text):
         raise ValueError("where 只能是筛选谓词，不能包含分号或 DDL/多条语句")
@@ -376,8 +380,8 @@ def sheet_rows(path: Path) -> int:
         con.close()
 
 
-def info(sha256: str, sheet: str | None) -> str:
-    manifest = reload_manifest(sha256)
+def info(sha256: str, sheet: str | None, header: int = 0) -> str:
+    manifest = reload_manifest(sha256, header)
     if manifest is None:
         raise FileNotFoundError("派生缓存清单缺失")
     sheets = manifest["sheets"]
@@ -389,7 +393,7 @@ def info(sha256: str, sheet: str | None) -> str:
     target = _pick_sheet(sheets, sheet)
     if target is None:
         return "\n".join(lines)
-    local = local_parquet(sha256, target["name"])
+    local = local_parquet(sha256, target["name"], header)
     if local is None:
         return "\n".join(lines)
     con = _connect()
@@ -421,12 +425,13 @@ def query(
     columns: list[str] | None,
     limit: int,
     offset: int,
+    header: int = 0,
 ) -> str:
-    manifest = reload_manifest(sha256)
+    manifest = reload_manifest(sha256, header)
     target = _pick_sheet(manifest["sheets"] if manifest else [], sheet)
     if target is None:
         raise ValueError(f"没有这个 sheet：{sheet}（可选：{[s['name'] for s in (manifest or {}).get('sheets', [])]}）")
-    local = local_parquet(sha256, target["name"])
+    local = local_parquet(sha256, target["name"], header)
     if local is None:
         raise FileNotFoundError(f"派生缓存缺失：{target['name']}")
     selected = [c for c in (columns or []) if c in target["columns"]]
@@ -447,8 +452,8 @@ def query(
     return head + "\n" + _csv(list(selected) or target["columns"], rows)
 
 
-def search(sha256: str, keyword: str, sheet: str | None, limit: int) -> str:
-    manifest = reload_manifest(sha256)
+def search(sha256: str, keyword: str, sheet: str | None, limit: int, header: int = 0) -> str:
+    manifest = reload_manifest(sha256, header)
     sheets = manifest["sheets"] if manifest else []
     targets = [s for s in sheets if sheet is None or s["name"] == sheet]
     if not targets:
@@ -459,7 +464,7 @@ def search(sha256: str, keyword: str, sheet: str | None, limit: int) -> str:
     con = _connect()
     try:
         for item in targets:
-            local = local_parquet(sha256, item["name"])
+            local = local_parquet(sha256, item["name"], header)
             if local is None:
                 continue
             columns = item["columns"][:_MAX_COLUMNS]
@@ -481,12 +486,12 @@ def search(sha256: str, keyword: str, sheet: str | None, limit: int) -> str:
     return head + "\n" + "\n".join(hits[:cap])
 
 
-def profile(sha256: str, sheet: str | None) -> str:
-    manifest = reload_manifest(sha256)
+def profile(sha256: str, sheet: str | None, header: int = 0) -> str:
+    manifest = reload_manifest(sha256, header)
     target = _pick_sheet(manifest["sheets"] if manifest else [], sheet)
     if target is None:
         raise ValueError(f"没有这个 sheet：{sheet}")
-    local = local_parquet(sha256, target["name"])
+    local = local_parquet(sha256, target["name"], header)
     if local is None:
         raise FileNotFoundError(f"派生缓存缺失：{target['name']}")
     columns = target["columns"][:_MAX_COLUMNS]

@@ -94,29 +94,35 @@ profile 只 `show /uploads`，工具 = `XLSX_TOOLS` + 量子解释器）。
 `_config_for` 把父会话的 `upload_owner`/`upload_thread` 转发进子 run config，
 `spaces.upload_scope(config)` 优先读它们。
 
-### 8. 大表另存一份 Parquet，查询交给 DuckDB（介质可配）
+### 8. 表格解析一次存 Parquet，查询交给 DuckDB（介质可配）
 
-xlsx 是 zip 里的 XML，每查一次都要重新解压解析。旧路径（`index.py`）建 SQLite 索引
-解决了"重复查"，但索引键是「路径 + mtime + size」、跨机器不通用，且只剩一种执行器。
-所以超过 `xlsx.cache_min_cells`（默认 2 万格）的表，第一次被查时：
+xlsx 是 zip 里的 XML，每查一次都要重新解压解析：80k×10×3 的表一次全读 41.7 s。
+早先的实现把解析结果塞进 SQLite 建索引，解决了"重复查"，但留下三个问题：索引键是
+「路径 + mtime + size」，跨机器不通用；**SQLite 依赖文件锁语义**，`cache_dir` 一旦
+指向共享卷（或想让多实例共用）就不再成立；只剩一种执行器，跨表 join 要手工搬数据。
+
+所以**删掉 SQLite 这条路**，任何表第一次被查时都解析一次：
 
 ```
 xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parquet
                                               │
-            本地 <cache_dir>/derived/<sha256>/<sheet>.parquet
-            远端 <xlsx.cache_prefix>/<sha256>/<sheet>.parquet（cache_mode=s3 时）
+        本地 <cache_dir>/derived/<sha256>/h<header>/<sheet>.parquet
+        远端 <xlsx.cache_prefix>/<sha256>/h<header>/<sheet>.parquet（cache_mode=s3）
 ```
 
-之后所有 `xlsx_info/query/search/profile` 都走 DuckDB `read_parquet`（列裁剪 + 谓词下推）。
-**小表不转**：解析本身要秒级，来回搬运不如直接读——阈值以上才值得。
+之后所有 `xlsx_info/query/search/profile` 都走 DuckDB `read_parquet`（列裁剪 + 谓词下推），
+四个工具只有一条实现。小表（几百行）解析本身 20ms，为它留一条"不物化"的分支不值得
+——多一条路径就多一处要守的行为差异。
 
 四条约束：
 
-1. **按内容哈希命名**：`sha256(xlsx 字节)` 决定目录名，同一份表在任何实例上解析结果
-   完全一致，可以跨机共享；表改了自然换新目录，不用失效逻辑。
+1. **按内容和表头命名**：`sha256(xlsx 字节) + header` 决定目录名（`<sha256>/h<header>/`）。
+   同一份表在任何实例上解析结果完全一致，可以跨机共享；表改了、或者用不同表头行号
+   查同一份文件，自然换新目录，不用失效逻辑。
 2. **介质用配置切**：`xlsx.cache_mode` = `local`（默认，只落本机）/ `s3`（多实例共享：
-   先查本地、未命中从对象存储拉一份回来）/ `off`（退回 SQLite 索引）。
-   `s3` 但没配对象存储时自动降级成 `local`，不会因为配置写错而全线报错。
+   先查本地、未命中从对象存储拉一份回来）。`s3` 但没配对象存储时自动降级成 `local`，
+   不会因为配置写错而全线报错。**没有 `off`**：不建缓存意味着每次查询重新解析（40 s 级），
+   那不是能交给运维去切的旋钮。
 3. **落盘必须原子**：`store.write_atomic`（同目录临时文件 + `os.replace` + 冲突重试）。
    两个 worker 同时建同一张表时字节相同，但直接 `write_bytes` 会让读者拿到半截 Parquet；
    Windows 上 `os.replace` 并发替换同一目标还会回 `PermissionError`，所以"对方已写完就
@@ -128,7 +134,8 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
 派生对象用 `scripts/reap_upload_orphans.py --xlsx-cache-days N --apply` 按 LastModified
-清（内容寻址、可重建，删了只是下次多解析一遍，不会丢数据）。
+清（内容寻址、可重建，删了只是下次多解析一遍，不会丢数据）。升级后旧的
+`<cache_dir>/*.sqlite`（老索引文件）已经没人读，可以直接删。
 
 ## 代价与已知风险
 
@@ -142,7 +149,9 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 - **本地盘模式没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / ADR-0017），
   上传目录在本地模式下不存在，`xlsx` 子 agent 也不挂。
 - **派生缓存要占第二份存储**：Parquet 通常比 xlsx 小（列裁剪 + ZSTD），但 80k 行级别
-  仍是 MB 级；`s3` 模式下对象数随"表 × sheet"增长，靠 TTL 回收。
+  仍是 MB 级；`s3` 模式下对象数随"表 × sheet × header"增长，靠 TTL 回收。
+- **每次都先付解析费**：没有"不物化"的捷径，小表也要写一次 Parquet（20ms 级）。
+  这是删掉 SQLite 换来的单一实现代价。
 - **首次查询付解析费**：`s3` 模式下如果本实例没缓存过这张表，要解析 + 上传；
   冷路径比 `local` 多一次网络往返（实测小文件 8ms / 单 sheet 拉回 34–67ms）。
 - **DuckDB 没有细粒度 authorizer**：`allowed_directories` 挡不住所有表函数，真正的护栏
