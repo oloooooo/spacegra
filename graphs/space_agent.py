@@ -28,9 +28,11 @@ from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
 from graphs.access.backend import SpaceBackend
-from graphs.access.spaces import allowed_spaces
+from graphs.access.mirage_backend import for_agent, workspace_for
+from graphs.access.spaces import allowed_spaces, upload_scope
 from graphs.model import model
 from graphs.tools import XLSX_TOOLS
+from shared import config
 from shared.knowledge.spec import has_tables, knowledge_root, load_agent_spec
 
 dotenv.load_dotenv()
@@ -40,6 +42,20 @@ def _space_of(config: RunnableConfig) -> str:
     """本次 run 绑定的 space（拦截层转发的是单元素列表）；取不到返回空串。"""
     spaces = allowed_spaces(config)
     return next(iter(sorted(spaces)), "") if spaces else ""
+
+
+def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
+    """子 agent 的只读 backend：本地磁盘按 space 隔离（ADR-0005）或 Mirage（ADR-0018）。
+
+    Mirage 模式下 profile = `hide "/" + show /<space> + /uploads`：空间看不见同级空间，
+    但能读父会话上传的文件（upload_scope 从拦截层转发的 upload_owner/upload_thread 取）。
+    """
+    space = _space_of(config_)
+    if config.get("okf.backend") != "s3fs" or not space:
+        return SpaceBackend(root_dir=knowledge_root())
+    owner, thread_id = upload_scope(config_)
+    workspace = workspace_for(owner=owner, thread_id=thread_id, agents={space: (space,)})
+    return for_agent(workspace, space)
 
 
 def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的图
@@ -69,6 +85,6 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
         tools=tools,
         middleware=middleware,
         # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
-        backend=SpaceBackend(root_dir=knowledge_root()),
+        backend=space_backend(config),
         permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
     )

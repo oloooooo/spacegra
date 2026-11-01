@@ -19,7 +19,7 @@
 模块顶层），异步 loader 在那里用不上；要异步场景可自行包 asyncio.to_thread。
 """
 
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 from langchain_core.prompts import PromptTemplate
@@ -27,7 +27,7 @@ from langchain_core.prompts import PromptTemplate
 _PROMPT_DIR = Path(__file__).resolve().parent
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_prompt(prompt_file_name: str) -> str:
     """读 ``<name>.md``（同步 + 进程级缓存）。文件不存在时报出可用列表。"""
     path = _PROMPT_DIR / f"{prompt_file_name}.md"
@@ -66,9 +66,12 @@ def render_prompt(name: str, **kwargs: object) -> str:
 
 # 模块级常量：图 import 时直接取，调用方不必关心加载方式。
 MAIN_SYSTEM_PROMPT = load_prompt("main")
+#: 通用表格子 agent（`graphs/xlsx_agent.py`）：只看得见 /uploads。
+XLSX_SYSTEM_PROMPT = load_prompt("xlsx")
 
 __all__ = [
     "MAIN_SYSTEM_PROMPT",
+    "XLSX_SYSTEM_PROMPT",
     "get_prompt",
     "list_prompts",
     "load_prompt",

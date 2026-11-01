@@ -57,6 +57,25 @@ def current_identity(config: Any) -> str:
     return str(_field(auth_user, "identity") or "local")
 
 
+def upload_scope(config: Any) -> tuple[str, str]:
+    """上传目录的隔离键 ``(owner, thread_id)``：对象存储里落在 ``uploads/<owner>/<thread>/``。
+
+    子 agent run 的身份是服务账号、线程是自己的子线程，拿不到父会话的上传目录，所以拦截层
+    （``graphs/middleware/async_task_guard.py::_config_for``）把父会话的 owner/thread 经
+    ``configurable.upload_owner`` / ``upload_thread`` 转发下来，这里优先读它们。
+
+    没有 thread_id（脚本直跑图）时用 ``no-thread`` 占位：那一轮就是看不到任何上传文件，
+    不会误读到别人的目录（owner 仍然不同）。
+    """
+    cfg = (config or {}).get("configurable") or {}
+    owner = str(cfg.get("upload_owner") or current_identity(config))
+    thread_id = str(cfg.get("upload_thread") or cfg.get("thread_id") or _NO_THREAD)
+    return owner, thread_id
+
+
+_NO_THREAD = "no-thread"
+
+
 def spaces_from_config_or_runtime() -> frozenset[str] | None:
     """backend 场景：从 langgraph 上下文取 config 再解析（同 StateBackend 模式）。"""
     try:

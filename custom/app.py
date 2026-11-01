@@ -7,7 +7,9 @@ from custom.api.delivery import router as delivery_router
 from custom.api.graphs import router as graphs_router
 from custom.api.spaces import router as spaces_router
 from custom.api.tasks import router as tasks_router
+from custom.api.uploads import router as uploads_router
 from custom.service.outbox_dispatcher import dispatcher as outbox_dispatcher
+from shared import lifecycle
 
 
 @asynccontextmanager
@@ -21,12 +23,15 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await outbox_dispatcher.stop()
+        # 图侧登记的退出清理（Mirage Workspace 池，ADR-0018）：不关会留下未关闭的 aiohttp 连接
+        await lifecycle.close_all()
 
 
 app = FastAPI(lifespan=lifespan)
 
 app.include_router(account_router)
 app.include_router(spaces_router)
+app.include_router(uploads_router)
 app.include_router(graphs_router)
 app.include_router(tasks_router)
 app.include_router(delivery_router)

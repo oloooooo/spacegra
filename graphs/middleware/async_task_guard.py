@@ -217,16 +217,28 @@ class AsyncTaskGuard(AgentMiddleware):
         写发件箱行的判据；不再往子 run 里塞父身份/回调地址。
         """
         cfg = request.runtime.config or {}
+        conf = cfg.get("configurable") or {}
         space = spec.get("space")
         if space:
             spaces = allowed_spaces(cfg)
             if spaces is not None and space not in spaces:
                 return None, f"用户没有空间 {space!r} 的权限，无法启动该子 agent（可用：{sorted(spaces)}）"
             user_spaces: list[str] | None = [space]
+        elif "spaces" in spec:
+            # spec 显式声明了可见范围（通用 xlsx 子 agent = 空：它只看得见 /uploads）
+            user_spaces = list(spec["spaces"])
         else:
             all_spaces = allowed_spaces(cfg)
             user_spaces = None if all_spaces is None else sorted(all_spaces)
-        return {"configurable": {"user_spaces": user_spaces}}, None
+        # upload_owner / upload_thread：子 run 的上传目录用父会话的，否则子 agent 看不见
+        # 用户在父会话里传的文件（owner 是服务账号、线程是子线程）。ADR-0018。
+        return {
+            "configurable": {
+                "user_spaces": user_spaces,
+                "upload_owner": current_identity(cfg),
+                "upload_thread": conf.get("thread_id"),
+            }
+        }, None
 
     @staticmethod
     def _thread_meta(request: ToolCallRequest) -> dict[str, Any]:
