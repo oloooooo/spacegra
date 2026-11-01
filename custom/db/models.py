@@ -161,7 +161,16 @@ class SessionObject(Base):
         String(200), primary_key=True, comment="上传文件名，形如 <空间名>_<表名>.xlsx"
     )
     space: Mapped[str] = mapped_column(
-        String(100), comment="从文件名前缀解析出的空间名，只用于路由到子 agent 与展示，**不是**隔离键"
+        String(100), comment="从文件名前缀解析出的空间名，只用于展示，**不是**隔离键"
+    )
+    target_agent: Mapped[str] = mapped_column(
+        String(100),
+        server_default="",
+        comment=(
+            "上传时用 shared.session.upload_rule.route_upload() 算好的投递目标"
+            "（空间名 / xlsx / main）；读路径不重算，避免上传者空间变了以后悄悄换人处理。"
+            "空值只出现在加这一列之前的老行"
+        ),
     )
     object_key: Mapped[str] = mapped_column(String(512), comment="对象存储 key（含 {sha16}）")
     sha256: Mapped[str] = mapped_column(String(64), comment="内容哈希；表索引的缓存键")

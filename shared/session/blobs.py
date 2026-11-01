@@ -51,6 +51,11 @@ def configured() -> bool:
     return bool(config.get("s3.endpoint"))
 
 
+def credentials() -> tuple[str, str]:
+    """`(access_key, secret_key)`。Mirage 的 `S3VFS` 与本模块的 boto3 client 共用这一份。"""
+    return _env("S3_ACCESS_KEY", "dev"), _env("S3_SECRET_KEY", "dev")
+
+
 _client_cache: Any = None
 
 
@@ -69,11 +74,12 @@ def client() -> Any:
         from botocore.config import Config
     except ImportError as e:  # pragma: no cover - 部署缺依赖时给个明白话
         raise BlobUnavailable("缺少 boto3，请先安装") from e
+    access_key, secret_key = credentials()
     _client_cache = boto3.client(
         "s3",
         endpoint_url=endpoint,
-        aws_access_key_id=_env("S3_ACCESS_KEY", "dev"),
-        aws_secret_access_key=_env("S3_SECRET_KEY", "dev"),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
         region_name=config.get("s3.region"),
         # 给了 endpoint_url 之后 boto3 仍默认 virtual-host，bucket.127.0.0.1:8333 解析不了
         config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
@@ -97,6 +103,20 @@ def session_prefix(owner: str, thread_id: str) -> str:
 
 def blob_key(owner: str, thread_id: str, sha256: str, name: str) -> str:
     return f"{session_prefix(owner, thread_id)}{sha256[:16]}/{name}"
+
+
+def upload_prefix(owner: str, thread_id: str) -> str:
+    """一个会话的上传目录前缀；Mirage 的 `/uploads` 就挂在这里（ADR-0018）。
+
+    owner/thread 直接进 key（不像 `session_prefix` 那样摘要）：前缀要能被人一眼读懂，
+    而且这个前缀同时是 S3 mount 的 `key_prefix`，摘要会让人对不上号。
+    """
+    return f"uploads/{owner}/{thread_id}/"
+
+
+def upload_key(owner: str, thread_id: str, name: str) -> str:
+    """上传对象的 key = 前缀 + 原始文件名。同名即覆盖（PUT 语义，不是版本链）。"""
+    return f"{upload_prefix(owner, thread_id)}{name}"
 
 
 def index_key(owner: str, thread_id: str, name: str, header: int, build: int) -> str:
