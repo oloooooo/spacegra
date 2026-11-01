@@ -96,6 +96,11 @@ def _cell_count(xlsx: Path) -> int:
         wb.close()
 
 
+def cell_count(xlsx: Path) -> int:
+    """表规模（行×列，按 sheet 累加）。工具层用它判断要不要建 Parquet 派生缓存。"""
+    return _cell_count(xlsx)
+
+
 def ensure(xlsx: Path, cache_dir: Path, cache_key: str, header: int) -> Path:
     """返回可用的索引路径；没有就建（先写临时文件再原子替换，避免读到半个文件）。
 

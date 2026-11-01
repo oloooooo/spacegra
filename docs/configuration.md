@@ -350,6 +350,10 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 | `xlsx.cache_dir` | `.cache/xlsx` | `XLSX_CACHE_DIR` | 索引的本机缓存（必须在 OKF 根之外） |
 | `xlsx.cache_ttl_days` | `7` | `XLSX_CACHE_TTL_DAYS` | 本机缓存保留天数 |
 | `xlsx.query_budget_ms` | `5000` | `XLSX_QUERY_BUDGET_MS` | 单次 `where` 查询的 CPU 预算，超了 `interrupt()` |
+| `xlsx.cache_mode` | `local` | `XLSX_CACHE_MODE` | 大表派生缓存介质：`local` 只落本机 / `s3` 多实例共享（未配对象存储时自动退回 `local`）/ `off` 退回 SQLite 索引 |
+| `xlsx.cache_prefix` | `xlsx-derived` | `XLSX_CACHE_PREFIX` | `cache_mode=s3` 时的对象前缀；派生对象按内容哈希命名，可随时清 |
+| `xlsx.cache_min_cells` | `20000` | `XLSX_CACHE_MIN_CELLS` | 低于这个格子数（行×列，所有 sheet 累加）不转 Parquet（解析成本大于收益） |
+| `xlsx.cache_local_max_mb` | `2048` | `XLSX_CACHE_LOCAL_MAX_MB` | 本机派生缓存预算，超了按最久未改动淘汰 |
 
 #### 对象存储（`shared/session/blobs.py`）
 

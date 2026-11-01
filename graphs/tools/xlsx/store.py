@@ -8,13 +8,54 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+import time
 from pathlib import Path
 
 from shared import config
 
+_REPLACE_ATTEMPTS = 6
+
 
 def cache_dir() -> Path:
     return Path(config.get("xlsx.cache_dir")).resolve()
+
+
+def write_atomic(target: Path, data: bytes) -> Path:
+    """同目录临时文件 + rename 落盘（并发安全）。
+
+    缓存文件名由内容哈希决定，多个 worker 同时写同一个 key 时字节完全相同，但：
+    - 直接 `write_bytes` 会让**读者看到半截文件**；
+    - Windows 上 `os.replace` 在两个进程同时替换同一目标时会回 `PermissionError`
+      （Linux 上 POSIX rename 原子且不会失败）。
+
+    所以：先写临时文件，再 replace；replace 失败时先看目标是否已经被别的 worker
+    写完（大小一致就接受，内容按哈希保证相同），否则小退避重试。
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, target)
+                return target
+            except PermissionError:
+                if _same_size(target, data):
+                    return target
+                time.sleep(0.01 * (attempt + 1))
+        raise OSError(f"无法落盘缓存文件（并发写入冲突）: {target}")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def _same_size(path: Path, data: bytes) -> bool:
+    try:
+        return path.stat().st_size == len(data)
+    except OSError:
+        return False
 
 
 def virtual_cache_path(vpath: str, data: bytes) -> Path:
@@ -25,10 +66,9 @@ def virtual_cache_path(vpath: str, data: bytes) -> Path:
     """
     digest = hashlib.sha256(data).hexdigest()[:16]
     target = cache_dir() / "vpath" / f"{digest}{Path(vpath).suffix or '.bin'}"
-    if not target.is_file():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    return target
+    if target.is_file():
+        return target
+    return write_atomic(target, data)
 
 
 def root() -> Path:

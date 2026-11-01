@@ -144,6 +144,21 @@ def get(key: str) -> bytes:
     return client().get_object(Bucket=bucket(), Key=key)["Body"].read()
 
 
+def get_or_none(key: str) -> bytes | None:
+    """对象不存在返回 None（缓存查找用），其余错误照旧上抛。"""
+    try:
+        return get(key)
+    except Exception as e:
+        if _is_missing(e):
+            return None
+        raise
+
+
+def put_bytes(key: str, data: bytes) -> None:
+    """小对象直写（派生缓存、清单这类已全部在内存里的字节）。"""
+    client().put_object(Bucket=bucket(), Key=key, Body=data)
+
+
 def download(key: str, dest: str) -> None:
     client().download_file(bucket(), key, dest)
 
@@ -288,6 +303,7 @@ def reap_tmp(older_than_seconds: int = 86400, *, dry_run: bool = False) -> int:
         if not page.get("IsTruncated"):
             return removed
         token = page.get("NextContinuationToken")
+
 
 # ---------- 内部 ----------
 

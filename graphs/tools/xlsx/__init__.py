@@ -15,6 +15,10 @@ agent 视角::
     xlsx_profile(path)                                # 空值/重复/类型/数值范围画像
 
 索引为什么必要：80k×10×3 的表现在一次全读 41.7 s，建好索引后 `WHERE … LIMIT 200` 是 2 ms。
+
+两条读路径（ADR-0018 §8）：格子数 ≥ `xlsx.cache_min_cells` 的表第一次被查时按 sheet
+转成 Parquet（`duck.py`，介质由 `xlsx.cache_mode` 定 local/s3），之后走 DuckDB `read_parquet`；
+小表与 `cache_mode: off` 走本文的 SQLite 索引。对外四个工具的行为一致。
 """
 
 import asyncio
@@ -26,7 +30,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from graphs.access.spaces import allowed_spaces
-from graphs.tools.xlsx import index, store
+from graphs.tools.xlsx import duck, index, store
 from graphs.tools.xlsx.schema import (
     XlsxHeader,
     XlsxInfoArgs,
@@ -110,10 +114,27 @@ def _conn(path: str, header: int) -> sqlite3.Connection:
     return index.open_ro(index.ensure(xlsx, store.cache_dir(), cache_key, header))
 
 
+async def _derived(local: str, header: int) -> str | None:
+    """小表不值得转 Parquet（解析本身就要一秒级），直接走老索引。
+
+    行数阈值用 openpyxl read_only 探（`index.cell_count`，实测 27 ms），不读整表。
+    """
+    if header:
+        return None
+    if duck.cache_mode() == "off":
+        return None
+    cells = await asyncio.to_thread(index.cell_count, Path(local))
+    if cells < int(app_config.get("xlsx.cache_min_cells")):
+        return None
+    return await duck.ensure(Path(local))
+
+
 # ---------- 同步实现（跑在线程池里） ----------
 
 
-def _info(local: str, display: str, sheet: str | None, header: int) -> str:
+def _info(local: str, display: str, sha256: str | None, sheet: str | None, header: int) -> str:
+    if sha256:
+        return duck.info(sha256, sheet)
     with closing(_conn(local, header)) as conn:
         return index.info(conn, display, sheet)
 
@@ -121,6 +142,7 @@ def _info(local: str, display: str, sheet: str | None, header: int) -> str:
 def _query(
     local: str,
     _display: str,
+    sha256: str | None,
     sheet: str | None,
     header: int,
     columns: list[str] | None,
@@ -128,16 +150,30 @@ def _query(
     limit: int,
     offset: int,
 ) -> str:
+    if sha256:
+        return duck.query(sha256, sheet, where, columns, limit, offset)
     with closing(_conn(local, header)) as conn:
         return index.query(conn, sheet, columns, where, limit, offset)
 
 
-def _search(local: str, _display: str, keyword: str, sheet: str | None, header: int, limit: int) -> str:
+def _search(
+    local: str,
+    _display: str,
+    sha256: str | None,
+    keyword: str,
+    sheet: str | None,
+    header: int,
+    limit: int,
+) -> str:
+    if sha256:
+        return duck.search(sha256, keyword, sheet, limit)
     with closing(_conn(local, header)) as conn:
         return index.search(conn, keyword, sheet, header, limit)
 
 
-def _profile(local: str, _display: str, sheet: str | None, header: int) -> str:
+def _profile(local: str, _display: str, sha256: str | None, sheet: str | None, header: int) -> str:
+    if sha256:
+        return duck.profile(sha256, sheet)
     with closing(_conn(local, header)) as conn:
         return index.profile(conn, sheet)
 
@@ -145,14 +181,15 @@ def _profile(local: str, _display: str, sheet: str | None, header: int) -> str:
 # ---------- 异步 tool（agent 用这一层） ----------
 
 
-async def _run(name: str, fn: Any, runtime: ToolRuntime, /, path: str, *args: Any) -> str:
+async def _run(name: str, fn: Any, runtime: ToolRuntime, /, path: str, header: int, *args: Any) -> str:
     """同步实现丢线程池；异常转成错误文本返回，让 agent 能自我纠正而不是炸图。"""
     writer = runtime.stream_writer
     writer({"tool": name, "event": "start", "args": [path, *args]})
     try:
         _check_scope(path, runtime.config)
         local = await _local_copy(path, runtime)
-        result = await asyncio.to_thread(fn, local, str(path), *args)
+        derived = await _derived(local, header)
+        result = await asyncio.to_thread(fn, local, str(path), derived, *args)
     except Exception as e:  # noqa: BLE001 —— 故意兜底，错误信息是给 agent 看的
         writer({"tool": name, "event": "error", "error": f"{type(e).__name__}: {e}"})
         return f"错误：{type(e).__name__}: {e}"
@@ -169,7 +206,7 @@ async def xlsx_info(path: XlsxPath, sheet: XlsxSheet = None, header: XlsxHeader 
         sheet: 要预览的 sheet 名，缺省预览第一个
         header: 表头所在行号（0 起）。表格上方有标题行时传 1
     """
-    return await _run("xlsx_info", _info, runtime, path, sheet, header)
+    return await _run("xlsx_info", _info, runtime, path, header, sheet)
 
 
 @tool(args_schema=XlsxQueryArgs)
@@ -201,7 +238,7 @@ async def xlsx_query(
         limit: 最多返回行数（单次上限 200）
         offset: 跳过前 N 行（翻页用）
     """
-    return await _run("xlsx_query", _query, runtime, path, sheet, header, columns, where, limit, offset)
+    return await _run("xlsx_query", _query, runtime, path, header, sheet, columns, where, limit, offset)
 
 
 @tool(args_schema=XlsxSearchArgs)
@@ -226,7 +263,7 @@ async def xlsx_search(
         header: 表头所在行号（0 起）
         limit: 最多返回命中数（单次上限 100）
     """
-    return await _run("xlsx_search", _search, runtime, path, keyword, sheet, header, limit)
+    return await _run("xlsx_search", _search, runtime, path, header, keyword, sheet, limit)
 
 
 @tool(args_schema=XlsxProfileArgs)
@@ -238,7 +275,7 @@ async def xlsx_profile(path: XlsxPath, sheet: XlsxSheet = None, header: XlsxHead
         sheet: sheet 名，缺省第一个
         header: 表头所在行号（0 起）
     """
-    return await _run("xlsx_profile", _profile, runtime, path, sheet, header)
+    return await _run("xlsx_profile", _profile, runtime, path, header, sheet)
 
 
 def _expose_model_schema(t: Any) -> Any:

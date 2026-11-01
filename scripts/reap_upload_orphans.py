@@ -100,6 +100,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="清掉没有台账行的上传对象")
     ap.add_argument("--apply", action="store_true", help="真的删（默认只 dry-run）")
     ap.add_argument("--older-than-hours", type=float, default=24.0)
+    ap.add_argument(
+        "--xlsx-cache-days",
+        type=float,
+        default=0.0,
+        help="同时清掉对象存储里超过 N 天的 xlsx 派生缓存（默认 0 = 不清）",
+    )
     args = ap.parse_args()
 
     report = asyncio.run(plan(timedelta(hours=args.older_than_hours)))
@@ -110,6 +116,11 @@ def main() -> None:
     )
     for prefix in report.orphan_prefixes[:20]:
         print("  孤儿:", prefix)
+    if args.xlsx_cache_days > 0:
+        from graphs.tools.xlsx import duck
+
+        objects, size = duck.prune_remote(args.xlsx_cache_days, dry_run=not args.apply)
+        print(f"xlsx 派生缓存：{objects} 个对象（{size / 1024 / 1024:.1f}MB）")
     if not args.apply:
         print("dry-run：加 --apply 才会真删")
         return

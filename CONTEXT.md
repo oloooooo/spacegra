@@ -24,6 +24,10 @@ _Avoid_: session、conversation、记忆
 Run 的唯一状态字段。终态只有 success / error / timeout / interrupted；活动态为 pending（排队中）与 running（已开始执行）。服务端没有 cancelled。
 _Avoid_: 状态机阶段、phase
 
+**派生缓存（derived cache）**:
+xlsx 的 Parquet 副本。文件名是**上传字节的 sha256**，每个 sheet 一份，超过 `xlsx.cache_min_cells` 的表第一次被查时才建；`xlsx.cache_mode` 决定只落本机（local）还是同时落对象存储供多实例共享（s3）。它不是真相，删了只会让下次查询多解析一遍。
+_Avoid_: 索引缓存（那指的是 `index.py` 的 SQLite 文件）、临时文件
+
 **Cancel action**:
 取消动作的取值，取规范的 interrupt（仅取消）与 rollback（取消后删除该 Run 及其 checkpoint）；本服务额外接受 cancel 作为 interrupt 的别名，且 rollback 未实现。
 _Avoid_: 把 Cancel action 当成 Run status
