@@ -1,7 +1,8 @@
 {
   "graphs": {
     "supervisor": "./graphs/supervisor.py:graph",
-    "domain_agent": "./graphs/space_agent.py:graph"
+    "domain_agent": "./graphs/space_agent.py:graph",
+    "xlsx_agent": "./graphs/xlsx_agent.py:graph"
   },
   "http": {
     "app": "./custom/app.py:app"
