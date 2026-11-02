@@ -141,4 +141,5 @@ dev = [
     "pre-commit>=4.0.1",
     "langchain-openai>=1.1.14",
     "langchain[mcp]>=1.4.4",
+    "pytest-timeout>=2.4.0",
 ]
