@@ -68,6 +68,58 @@ def test_check_where_allows_plain_predicates(where: str) -> None:
     assert duck._check_where(where) == where
 
 
+@pytest.fixture
+def parsed(tmp_path: Path, monkeypatch):
+    """谓词校验要真解析，所以建一次连接（local 模式，不碰网络）。"""
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
+    con = duck._connect()
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "a > 1 AND b LIKE '%x%'",
+        "数量 BETWEEN 1 AND 9",
+        "c || 'x' = 'y'",
+        "CAST(a AS VARCHAR) = '1'",
+        "NOT a = 1",
+        "strftime(a, '%Y') = '2024'",
+        "coalesce(a, 0) > 1",
+    ],
+)
+def test_check_predicate_allows_plain_predicates(parsed, where: str) -> None:
+    """合法谓词照旧放行——闸门不能把模型的正常写法也堵死。"""
+    assert duck._check_predicate(parsed, where) == where
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "EXISTS (FROM query('FROM read_text(''/etc/passwd'')'))",
+        "read_text('/etc/passwd') IS NOT NULL",
+        "glob('*') IS NOT NULL",
+        "a IN (SELECT 1)",
+    ],
+)
+def test_check_predicate_rejects_subqueries_and_table_functions(parsed, where: str) -> None:
+    """s3 模式外部访问开着，语法树闸门是挡住 `read_text` / `query(...)` 的唯一一层。"""
+    with pytest.raises(ValueError):
+        duck._check_predicate(parsed, where)
+
+
+def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
+    """s3 模式直接给 `s3://` 地址：多主机不需要本地缓存目录（ADR-0018 §6）。"""
+    monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
+    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_prefix": "xlsx-derived"}))
+    monkeypatch.setattr(duck.blobs, "bucket", lambda: "bench")
+
+    assert duck.local_parquet(SHA, "Sheet1") == f"s3://bench/xlsx-derived/{SHA}/h0/Sheet1.parquet"
+
+
 def test_ident_escapes_quotes() -> None:
     """列名来自 xlsx 表头，双引号必须翻倍，否则能拼出第二个标识符/谓词。"""
     assert duck._ident('a"b') == '"a""b"'

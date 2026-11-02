@@ -42,9 +42,9 @@ xlsx:
   cache_dir: .cache/xlsx        # 派生缓存与下载字节的本机目录，必须在 okf.dir（knowledge/）之外
   query_budget_ms: 5000         # 单次 where 查询的 CPU 预算，超了 interrupt()
   # 表第一次被查时按 sheet 转成 Parquet（内容哈希 + header 决定目录），之后走 DuckDB。
-  cache_mode: local             # local = 只落本机；s3 = 同时写对象存储供多实例共享（<cache_prefix>/<sha256>/h<header>/）
+  cache_mode: local             # local = 只落本机；s3 = 写对象存储且查询直读（多实例无需本地缓存目录）
   cache_prefix: xlsx-derived    # cache_mode=s3 时的对象前缀（内容寻址，可随时清）
-  cache_local_max_mb: 2048      # 本机派生缓存的总预算，超了按最久未改动淘汰
+  cache_local_max_mb: 2048      # 本机派生缓存的总预算（s3 模式下本地那份只是建缓存时的副产物）
 
 # --- 对象存储（shared/session/blobs.py，ADR-0016）---
 # 凭证**不在这里**，写 .env：S3_ACCESS_KEY / S3_SECRET_KEY（密钥不进 git）。
