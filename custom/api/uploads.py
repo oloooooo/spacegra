@@ -59,5 +59,9 @@ async def upload_file(
     except uploads.UploadError as e:
         await session.rollback()
         raise HTTPException(status_code=e.status_code, detail=e.message) from e
+    except ValueError as e:
+        # thread_id 拼不进上传路径（含分隔符/保留字符）：4xx，不是 500。
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=f"当前会话不能存放上传文件：{e}") from e
     await session.commit()
     return result

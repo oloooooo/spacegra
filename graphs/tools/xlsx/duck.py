@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 from collections.abc import Iterator
@@ -373,6 +374,10 @@ def prune_remote(older_than_days: float, *, dry_run: bool = False) -> tuple[int,
     if not dry_run:
         for key in victims:
             blobs.delete(key)
+            # 本地清单可能还在（清单本地优先命中）：一起清掉，否则查询会一直指向已删的远端对象
+            tail = key[len(prefix) :].split("/")
+            if len(tail) >= 2 and len(tail[0]) == 64:
+                shutil.rmtree(_derived_dir() / tail[0], ignore_errors=True)
     return len(victims), total
 
 
@@ -467,7 +472,7 @@ def _check_predicate(con: Any, where: str) -> str:
     `read_text('/etc/passwd')` 的闸门。
     """
     text = _check_where(where)
-    if sql_policy() != "strict":  # 显式关掉白名单（config.yaml 的 xlsx.sql_policy）
+    if sql_policy() == "free":  # 显式关掉白名单（config.yaml 的 xlsx.sql_policy）；未知值按 strict 处理
         return text
     raw = con.execute("SELECT json_serialize_sql(?)", [f"SELECT 1 WHERE {text}"]).fetchone()[0]
     ast = json.loads(raw)
@@ -639,7 +644,7 @@ def profile(sha256: str, sheet: str | None, header: int = 0) -> str:
         lines = [f"[{target['name']}] {rows} 行 × {len(target['columns'])} 列"]
         for column in columns:
             sql = (
-                f'SELECT count(*) FILTER (WHERE "{column}" IS NULL), count(DISTINCT "{column}"), '
+                f"SELECT count(*) FILTER (WHERE {_ident(column)} IS NULL), count(DISTINCT {_ident(column)}), "
                 f"min({_ident(column)}), max({_ident(column)}) FROM {_source(local)}"
             )
             nulls, uniq, low, high = _rows(con, sql)[0]
