@@ -81,7 +81,9 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
     maker = get_session_maker()
     async with maker() as session:
         rows = (await session.execute(select(SessionObject.owner_identity, SessionObject.thread_id))).all()
-    live = {f"uploads/{owner}/{thread}/" for owner, thread in rows}
+    # 前缀形状必须与 `_iter_prefixes()` 的聚合方式一致（`uploads/<owner>/<thread>/`），
+    # 少了 `uploads/` 这一段就永远不命中，所有对象都会被当孤儿删掉（#4）。
+    live = {blobs.upload_prefix(owner, thread) for owner, thread in rows}
 
     for prefix, objects in prefixes.items():
         if prefix in live:
