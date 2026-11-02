@@ -54,7 +54,10 @@ class _StubConfig:
         return self._values[key]
 
 
-@pytest.mark.parametrize("where", ["1=1; DROP TABLE t", "x = 1 OR (SELECT 1)", "ATTACH 'x' AS y"])
+@pytest.mark.parametrize(
+    "where",
+    ["1=1; DROP TABLE t", "x = 1 OR (SELECT 1)", "ATTACH 'x' AS y", "1=1 --", "1=1 /* x */"],
+)
 def test_check_where_rejects_multiple_statements(where: str) -> None:
     with pytest.raises(ValueError):
         duck._check_where(where)
@@ -63,6 +66,39 @@ def test_check_where_rejects_multiple_statements(where: str) -> None:
 @pytest.mark.parametrize("where", ["数量 > 0", "a = 'x' AND b IS NOT NULL", "c BETWEEN 1 AND 9"])
 def test_check_where_allows_plain_predicates(where: str) -> None:
     assert duck._check_where(where) == where
+
+
+def test_ident_escapes_quotes() -> None:
+    """列名来自 xlsx 表头，双引号必须翻倍，否则能拼出第二个标识符/谓词。"""
+    assert duck._ident('a"b') == '"a""b"'
+
+
+def test_connect_reads_only_derived_dir(tmp_path: Path, monkeypatch) -> None:
+    """issue #3：只限 allowed_directories 不够，外部访问必须整体关掉。
+
+    `read_text`/`glob` 不受 allowed_directories 约束，只有 `enable_external_access=false` 能拦。
+    """
+    import duckdb  # noqa: PLC0415 —— 可选依赖，只在装了它的环境跑
+
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
+    allowed = tmp_path / "derived" / "ab" / "S.parquet"
+    allowed.parent.mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    writer = duckdb.connect(":memory:")
+    writer.execute(f"COPY (SELECT 1 AS x) TO {duck._literal(allowed.as_posix())} (FORMAT PARQUET)")
+    writer.close()
+
+    con = duck._connect()
+    try:
+        assert con.execute(f"SELECT count(*) FROM {duck._source(allowed)}").fetchone() == (1,)
+        for sql in (
+            f"SELECT content FROM read_text({duck._literal((tmp_path / 'secret.txt').as_posix())})",
+            f"SELECT * FROM glob({duck._literal(tmp_path.as_posix() + '/*')})",
+        ):
+            with pytest.raises(Exception, match="Cannot access file"):
+                con.execute(sql)
+    finally:
+        con.close()
 
 
 def test_cache_mode_falls_back_to_local_without_s3(monkeypatch) -> None:
