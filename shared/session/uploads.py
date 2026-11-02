@@ -36,6 +36,7 @@ from typing import Any, BinaryIO
 import structlog
 
 from shared import config
+from shared.paths import safe_segment
 from shared.session import blobs
 
 logger = structlog.getLogger(__name__)
@@ -69,12 +70,25 @@ def local_root() -> Path:
 
 def local_dir(owner: str, thread_id: str) -> Path:
     """某个会话的上传目录。不创建——调用方需要时自己 `mkdir`。"""
-    return local_root() / owner / thread_id
+    return _inside(owner, thread_id)
 
 
 def local_path(owner: str, thread_id: str, name: str) -> Path:
     """一个上传文件在本地介质里的绝对路径（不看介质类型，只算位置）。"""
-    return local_dir(owner, thread_id) / name
+    return _inside(owner, thread_id, name)
+
+
+def _inside(*parts: str) -> Path:
+    """拼路径并断言没跑出 `local_root()`：读、写、删三个 sink 都从这里过。
+
+    owner / thread / name 都可能来自客户端（注册的 identity、上传表单的 thread_id、
+    文件名），任何一段带分隔符或 `..` 都会把路径搬到根外（ADR-0018 §10）。
+    """
+    root = local_root()
+    path = root.joinpath(*(safe_segment(part) for part in parts)).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("上传路径越界")
+    return path
 
 
 def key(owner: str, thread_id: str, name: str) -> str:

@@ -30,14 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from custom.db.models import SessionObject
 from shared import config
+from shared.paths import safe_segment
 from shared.session import uploads as upload_store
 from shared.session.upload_rule import route_upload
 
 logger = structlog.getLogger(__name__)
 
-#: 文件名里出现就拒绝的字符：路径分隔符与 NUL。**不做**"清洗成合法名"——
-#: 上传要按用户看到的文件名落到 /uploads 下，改名会让 agent 找不到。
-_BAD_CHARS = ("/", "\\", "\x00")
 _MAX_NAME = 200
 
 
@@ -51,13 +49,16 @@ class UploadError(Exception):
 
 
 def safe_name(name: str) -> str:
-    """校验上传文件名（保留原名，不做清洗）。"""
+    """校验上传文件名（保留原名，不做清洗）。
+
+    与 `shared.paths.safe_segment` 同一套判据：名字要原样拼进上传路径，
+    所以分隔符、`:`（NTFS 数据流）、以点结尾（Windows 静默改写）都不收。
+    """
     name = (name or "").strip()
-    if not name or len(name) > _MAX_NAME:
-        raise UploadError("文件名不能为空，且最长 200 字符", 422)
-    if any(c in name for c in _BAD_CHARS) or name in {".", ".."}:
-        raise UploadError("文件名不能包含路径分隔符或 NUL", 422)
-    return name
+    try:
+        return safe_segment(name, limit=_MAX_NAME)
+    except ValueError as e:
+        raise UploadError(f"文件名不合法：{e}", 422) from e
 
 
 def size_limit(name: str) -> int:

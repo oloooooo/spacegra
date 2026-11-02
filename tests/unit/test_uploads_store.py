@@ -110,6 +110,32 @@ class TestMaterialize:
         assert uploads.materialize("u1", "t1", "nope.xlsx") is None
 
 
+class TestPathContainment:
+    """owner/thread/name 都可能来自客户端，任何一段越界都不收（issue #1）。"""
+
+    @pytest.mark.parametrize(("owner", "thread"), [("..", "t1"), ("u1", ".."), ("../x", "t1"), ("u1", "t1/../..")])
+    def test_rejects_owner_or_thread(self, local_dir: Path, owner: str, thread: str) -> None:
+        with pytest.raises(ValueError):
+            uploads.local_dir(owner, thread)
+        with pytest.raises(ValueError):
+            uploads.local_path(owner, thread, "a.md")
+
+    @pytest.mark.parametrize("name", ["../../evil.pth", "a/b.md", "a\\b.md", "x.pth:ads", "trailing."])
+    def test_rejects_name(self, local_dir: Path, name: str) -> None:
+        with pytest.raises(ValueError):
+            uploads.local_path("u1", "t1", name)
+
+    def test_keeps_chinese_names_under_root(self, local_dir: Path) -> None:
+        path = uploads.local_path("张三-9d6966", "t1", "碳排放 1.xlsx")
+        assert path == (local_dir / "张三-9d6966" / "t1" / "碳排放 1.xlsx").resolve()
+        assert path.is_relative_to(local_dir.resolve())
+
+    def test_put_stream_refuses_dotdot(self, local_dir: Path) -> None:
+        with pytest.raises(ValueError):
+            uploads.put_stream(io.BytesIO(b"x"), owner="..", thread_id="..", name="evil.pth", max_bytes=64)
+        assert list(local_dir.parent.glob("evil*")) == []
+
+
 class TestCleanup:
     def test_delete_removes_local_file(self, local_dir: Path) -> None:
         uploads.put_stream(io.BytesIO(b"x"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)

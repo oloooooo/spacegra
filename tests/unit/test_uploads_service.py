@@ -22,11 +22,11 @@ class TestSafeName:
             uploads.safe_name(name)
         assert e.value.status_code == 422
 
-    @pytest.mark.parametrize("name", ["a/b.xlsx", "a\\b.xlsx", "a\x00b.xlsx", "../x.xlsx"])
+    @pytest.mark.parametrize("name", ["a/b.xlsx", "a\\b.xlsx", "a\x00b.xlsx", "../x.xlsx", "a:b.xlsx", "x."])
     def test_rejects_path_separators(self, name: str) -> None:
         with pytest.raises(uploads.UploadError) as e:
             uploads.safe_name(name)
-        assert "路径分隔符" in e.value.message
+        assert "不合法" in e.value.message
         assert e.value.status_code == 422
 
     def test_rejects_overlong_name(self) -> None:

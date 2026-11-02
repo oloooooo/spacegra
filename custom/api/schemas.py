@@ -1,9 +1,20 @@
-from ast import List
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from shared.paths import safe_segment
 
 Permission = Literal["read", "write"]
+
+_IDENTITY_MAX = 64
+
+
+def _identity(value: str) -> str:
+    """identity 会拼进上传目录（``<owner>/<thread>/<名>``），必须是单个路径段。"""
+    try:
+        return safe_segment(value, limit=_IDENTITY_MAX)
+    except ValueError as e:
+        raise ValueError(f"账号名不合法：{e}") from e
 
 
 class MessagesBaseModel(BaseModel):
@@ -17,6 +28,8 @@ class RegisterRequest(BaseModel):
     email: str | None = None
     password: str
 
+    _check_identity = field_validator("identity")(_identity)
+
 
 class RegisterResponse(MessagesBaseModel):
     user_identity: str
@@ -25,6 +38,8 @@ class RegisterResponse(MessagesBaseModel):
 class LoginRequest(BaseModel):
     identity: str
     password: str
+
+    _check_identity = field_validator("identity")(_identity)
 
 
 class TokenResponse(MessagesBaseModel):
