@@ -117,17 +117,20 @@ def sha256_file(path: Path) -> str:
 
 
 def _connect():  # noqa: ANN202 —— duckdb 的类型在可选依赖里
-    """内存库 + 限制可访问目录 + 锁配置。
+    """内存库 + 关外部访问 + 限制可访问目录 + 锁配置。
 
-    `where` 是模型写的谓词，是最外层的注入面。三层护栏：`_check_where` 禁掉分号、
-    DDL 与 `select`/`read_*`/`glob` 这类表函数（没有子查询就调不到表函数）；连接
-    限定 `allowed_directories` 并 `lock_configuration`；`columns` 一律按清单里的列名
-    过滤并加双引号，不拼接模型给的任意标识符。
+    `where` 是模型写的谓词，是最外层的注入面。三层护栏：`_check_where` 禁掉分号与
+    注释符；连接把 `enable_external_access` 关掉——只留 `allowed_directories` 这一个
+    口子，`read_text`/`glob`/`read_csv` 这些表函数即使被调进来也读不到禁止目录；
+    列名一律先按清单过滤再 `_ident` 转义，不拼接模型给的任意标识符。
     """
     import duckdb
 
     con = duckdb.connect(":memory:")
-    con.execute(f"SET allowed_directories = ['{_derived_dir().as_posix()}']")
+    # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
+    # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。
+    con.execute(f"SET allowed_directories = [{_literal(_derived_dir().as_posix())}]")
+    con.execute("SET enable_external_access = false")
     con.execute("SET lock_configuration = true")
     return con
 
@@ -322,6 +325,11 @@ def _literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _ident(name: str) -> str:
+    """列名标识符：双引号包住、内部双引号翻倍（表头来自 xlsx，不可信）。"""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def _source(path: Path) -> str:
     return f"read_parquet({_literal(str(path))})"
 
@@ -348,10 +356,13 @@ def _columns(con: Any, path: Path) -> list[str]:
 
 
 def _check_where(where: str) -> str:
-    """`where` 是模型写的 SQL 谓词：禁止多语句与 DDL/扩展加载。"""
+    """`where` 是模型写的 SQL 谓词：禁掉多语句、注释与 DDL/扩展加载。
+
+    注释符必禁：``1=1 --`` 会把后面的 ``LIMIT/OFFSET`` 一并注释掉。
+    """
     text = where.strip().rstrip(";").strip()
-    if ";" in text or _FORBIDDEN_SQL.search(text):
-        raise ValueError("where 只能是筛选谓词，不能包含分号或 DDL/多条语句")
+    if ";" in text or "--" in text or "/*" in text or _FORBIDDEN_SQL.search(text):
+        raise ValueError("where 只能是筛选谓词，不能包含分号、注释或 DDL/多条语句")
     return text
 
 
@@ -436,7 +447,7 @@ def query(
         raise FileNotFoundError(f"派生缓存缺失：{target['name']}")
     selected = [c for c in (columns or []) if c in target["columns"]]
     unknown = [c for c in (columns or []) if c not in target["columns"]]
-    projection = ", ".join(f'"{c}"' for c in selected) if selected else "*"
+    projection = ", ".join(_ident(c) for c in selected) if selected else "*"
     predicate = f" WHERE {_check_where(where)}" if where else ""
     size = min(max(int(limit), 1), _MAX_ROWS)
     start = max(int(offset), 0)
@@ -472,7 +483,7 @@ def search(sha256: str, keyword: str, sheet: str | None, limit: int, header: int
                 continue
             parts = [
                 f"SELECT {_literal(c)} AS col, count(*) AS n FROM {_source(local)} "
-                f'WHERE lower(CAST("{c}" AS VARCHAR)) LIKE {_literal(needle)}'
+                f"WHERE lower(CAST({_ident(c)} AS VARCHAR)) LIKE {_literal(needle)}"
                 for c in columns
             ]
             for col, count in _rows(con, " UNION ALL ".join(parts)):
@@ -502,7 +513,7 @@ def profile(sha256: str, sheet: str | None, header: int = 0) -> str:
         for column in columns:
             sql = (
                 f'SELECT count(*) FILTER (WHERE "{column}" IS NULL), count(DISTINCT "{column}"), '
-                f'min("{column}"), max("{column}") FROM {_source(local)}'
+                f"min({_ident(column)}), max({_ident(column)}) FROM {_source(local)}"
             )
             nulls, uniq, low, high = _rows(con, sql)[0]
             span = f"{_format_value(low)} ~ {_format_value(high)}" if low is not None else "-"
