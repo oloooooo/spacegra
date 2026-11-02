@@ -41,6 +41,11 @@ from shared.session import blobs
 
 logger = structlog.getLogger(__name__)
 
+#: 单个路径段的上限。文件名在 `custom/service/uploads.py::safe_name` 另有 200 的字长限制；
+#: 这里放到 255，是因为 thread_id 由客户端决定（`ENTITY_ID_PATTERN = r"\S"`，上限 255），
+#: 用 200 会让 201–255 长度的合法线程直接报错。
+_MAX_SEGMENT = 255
+
 _CHUNK = 1024 * 1024
 
 
@@ -85,7 +90,7 @@ def _inside(*parts: str) -> Path:
     文件名），任何一段带分隔符或 `..` 都会把路径搬到根外（ADR-0018 §10）。
     """
     root = local_root()
-    path = root.joinpath(*(safe_segment(part) for part in parts)).resolve()
+    path = root.joinpath(*(safe_segment(part, limit=_MAX_SEGMENT) for part in parts)).resolve()
     if not path.is_relative_to(root):
         raise ValueError("上传路径越界")
     return path

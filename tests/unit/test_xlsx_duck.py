@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -127,8 +128,9 @@ def test_free_policy_only_keeps_the_text_gate(parsed, monkeypatch) -> None:
 
 def test_unknown_policy_falls_back_to_strict(parsed, monkeypatch) -> None:
     monkeypatch.setenv("XLSX_SQL_POLICY", "loose")
-    with pytest.raises(ValueError):
-        duck._check_predicate(parsed, "a IN (SELECT 1)")
+    # 能穿过文本闸门、只有语法树会拦的载荷，才看得出策略是真 strict 还是 fail-open
+    with pytest.raises(ValueError, match="subquery"):
+        duck._check_predicate(parsed, "EXISTS (FROM query('FROM read_' || 'text(''/etc/passwd'')'))")
 
 
 def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
@@ -143,6 +145,36 @@ def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
 def test_ident_escapes_quotes() -> None:
     """列名来自 xlsx 表头，双引号必须翻倍，否则能拼出第二个标识符/谓词。"""
     assert duck._ident('a"b') == '"a""b"'
+
+
+def test_profile_escapes_hostile_column_names(tmp_path: Path, monkeypatch) -> None:
+    """表头里带 `"` 的列不能改写 profile 的 SQL（旧实现只在 min/max 上转了义）。"""
+    import duckdb  # noqa: PLC0415 —— 可选依赖
+
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
+    hostile = "x\"), count(*), min(x), max(x) FROM read_parquet('/etc/passwd') --"
+    target = duck.store_path(SHA, "Sheet1")
+    target.parent.mkdir(parents=True)
+    writer = duckdb.connect(":memory:")
+    writer.execute(f"COPY (SELECT 1 AS {duck._ident(hostile)}) TO {duck._literal(target.as_posix())} (FORMAT PARQUET)")
+    writer.close()
+    duck._manifest_path(SHA).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "sha256": SHA,
+                "header": 0,
+                "engine": "duckdb",
+                "sheets": [{"name": "Sheet1", "rows": 1, "columns": [hostile], "bytes": 1}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    text = duck.profile(SHA, "Sheet1")
+
+    assert "1 行 × 1 列" in text
 
 
 def test_connect_reads_only_derived_dir(tmp_path: Path, monkeypatch) -> None:

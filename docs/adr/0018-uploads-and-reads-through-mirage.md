@@ -140,7 +140,8 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
 派生对象用 `scripts/reap_upload_orphans.py --xlsx-cache-days N --apply` 按 LastModified
-清（内容寻址、可重建，删了只是下次多解析一遍，不会丢数据）。升级后旧的
+清（内容寻址、可重建，删了只是下次多解析一遍，不会丢数据；清远端时会连同本机清单
+一起删，否则本机会一直指向已不存在的对象）。升级后旧的
 `<cache_dir>/*.sqlite`（老索引文件）已经没人读，可以直接删。
 
 ### 9. 单机也能跑：上传介质与读路径解耦

@@ -36,10 +36,9 @@ class RegisterResponse(MessagesBaseModel):
 
 
 class LoginRequest(BaseModel):
+    # 登录不校验 identity 形态：历史账号可能含 `:`/`\` 这类字符，注册已经挡住了新的。
     identity: str
     password: str
-
-    _check_identity = field_validator("identity")(_identity)
 
 
 class TokenResponse(MessagesBaseModel):

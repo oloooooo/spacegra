@@ -25,7 +25,7 @@ Run 的唯一状态字段。终态只有 success / error / timeout / interrupted
 _Avoid_: 状态机阶段、phase
 
 **派生缓存（derived cache）**:
-xlsx 的 Parquet 副本。目录是**上传字节的 sha256 + 表头行号**（`<sha256>/h<header>/`），每个 sheet 一份，表第一次被查时才建；`xlsx.cache_mode` 决定只落本机（local）还是同时落对象存储供多实例共享（s3）。它不是真相，删了只会让下次查询多解析一遍。
+xlsx 的 Parquet 副本。目录是**上传字节的 sha256 + 表头行号**（`<sha256>/h<header>/`），每个 sheet 一份，表第一次被查时才建；`xlsx.cache_mode` 决定只落本机（local）还是把派生对象写到对象存储并**直读**（s3，多实例不需要本地缓存目录）。它不是真相，删了只会让下次查询多解析一遍。
 _Avoid_: 索引缓存（`index.py` 已删除）、临时文件
 
 **上传介质（upload store）**:

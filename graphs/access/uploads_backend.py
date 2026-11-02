@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import structlog
 from deepagents.backends import CompositeBackend
 from deepagents.backends.protocol import BackendProtocol
 
@@ -30,6 +31,8 @@ from graphs.access.spaces import upload_scope
 from shared import config as app_config
 from shared.knowledge.root import knowledge_root
 from shared.session import uploads
+
+logger = structlog.getLogger(__name__)
 
 #: 上传目录在 agent 视角下的挂载点（路由前缀必须带尾斜杠）
 UPLOADS_MOUNT = "/uploads/"
@@ -42,9 +45,17 @@ def is_mirage_mode(config: dict | None = None) -> bool:
 
 
 def uploads_backend(config: dict) -> LocalBackend:
-    """当前 run 的 `/uploads` backend（只读、限制在本会话目录内）。"""
+    """当前 run 的 `/uploads` backend（只读、限制在本会话目录内）。
+
+    thread_id 由客户端定（`ENTITY_ID_PATTERN = r"\\S"`），像 `user:1` 这种拼不进路径：
+    此时挂一个空目录，run 照常跑、只是看不见任何上传，而不是每次建图都抛 500。
+    """
     owner, thread_id = upload_scope(config)
-    root = uploads.ensure_dir(uploads.local_dir(owner, thread_id))
+    try:
+        root = uploads.ensure_dir(uploads.local_dir(owner, thread_id))
+    except ValueError as e:
+        logger.warning("uploads.backend.unusable_scope", owner=owner, thread_id=thread_id, error=str(e))
+        root = uploads.ensure_dir(uploads.local_root() / "_unusable")
     return LocalBackend(root, allow_write=False)
 
 

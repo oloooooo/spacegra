@@ -189,7 +189,11 @@ def main() -> None:
         print(f"  已删 {prefix} → {deleted} 个对象")
     for prefix in report.local_prefixes:
         owner, thread = prefix.rstrip("/").split("/")[:2]
-        uploads.delete_thread(owner, thread)
+        try:
+            uploads.delete_thread(owner, thread)
+        except ValueError as e:  # 遗留的非法目录名：跳过，其他目录照删
+            print(f"  跳过 {prefix}（{e}）")
+            continue
         print(f"  已删本地 {prefix}")
 
 
