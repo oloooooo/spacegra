@@ -37,6 +37,7 @@ _SPEC: dict[str, tuple[str, Any]] = {
     "xlsx.max_blob_mb_per_user": ("MAX_BLOB_MB_PER_USER", 2048),
     "xlsx.cache_dir": ("XLSX_CACHE_DIR", ".cache/xlsx"),
     "xlsx.query_budget_ms": ("XLSX_QUERY_BUDGET_MS", 5000),
+    "xlsx.sql_policy": ("XLSX_SQL_POLICY", "strict"),
     "xlsx.cache_mode": ("XLSX_CACHE_MODE", "local"),
     "xlsx.cache_prefix": ("XLSX_CACHE_PREFIX", "xlsx-derived"),
     "xlsx.cache_local_max_mb": ("XLSX_CACHE_LOCAL_MAX_MB", 2048),

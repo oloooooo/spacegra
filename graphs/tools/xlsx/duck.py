@@ -135,6 +135,11 @@ def cache_mode() -> str:
     return "s3" if blobs.configured() else "local"
 
 
+def sql_policy() -> str:
+    """``strict`` = 语法树白名单（默认）；``free`` = 只拦多条语句/注释，谓词原样交给 DuckDB。"""
+    return str(config.get("xlsx.sql_policy")).strip().lower() or "strict"
+
+
 def _derived_dir() -> Path:
     return store.cache_dir() / "derived"
 
@@ -462,6 +467,8 @@ def _check_predicate(con: Any, where: str) -> str:
     `read_text('/etc/passwd')` 的闸门。
     """
     text = _check_where(where)
+    if sql_policy() != "strict":  # 显式关掉白名单（config.yaml 的 xlsx.sql_policy）
+        return text
     raw = con.execute("SELECT json_serialize_sql(?)", [f"SELECT 1 WHERE {text}"]).fetchone()[0]
     ast = json.loads(raw)
     if ast.get("error"):

@@ -111,6 +111,26 @@ def test_check_predicate_rejects_subqueries_and_table_functions(parsed, where: s
         duck._check_predicate(parsed, where)
 
 
+def test_sql_policy_defaults_to_strict(monkeypatch) -> None:
+    monkeypatch.delenv("XLSX_SQL_POLICY", raising=False)
+    assert duck.sql_policy() == "strict"
+
+
+def test_free_policy_only_keeps_the_text_gate(parsed, monkeypatch) -> None:
+    """`free` 是显式退路：子查询/拼接载荷放行，多条语句与注释照样拦。"""
+    monkeypatch.setenv("XLSX_SQL_POLICY", "free")
+    bypass = "EXISTS (FROM query('FROM read_' || 'text(''/etc/passwd'')'))"
+    assert duck._check_predicate(parsed, bypass) == bypass
+    with pytest.raises(ValueError):
+        duck._check_predicate(parsed, "a = 1; DROP TABLE t")
+
+
+def test_unknown_policy_falls_back_to_strict(parsed, monkeypatch) -> None:
+    monkeypatch.setenv("XLSX_SQL_POLICY", "loose")
+    with pytest.raises(ValueError):
+        duck._check_predicate(parsed, "a IN (SELECT 1)")
+
+
 def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
     """s3 模式直接给 `s3://` 地址：多主机不需要本地缓存目录（ADR-0018 §6）。"""
     monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
