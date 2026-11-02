@@ -26,7 +26,8 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -46,7 +47,7 @@ from mirage.types import MountMode
 from mirage.vfs.s3 import S3VFS, S3Config
 
 from shared import config, lifecycle
-from shared.session import blobs, uploads, upload_rule
+from shared.session import blobs, upload_rule, uploads
 from shared.session.store import identity_digest
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,22 @@ _POOL_MAX = 8
 _POOL_TTL_SECONDS = 300.0
 _pool: dict[str, tuple[Workspace, float]] = {}
 _agent_backends: dict[str, MirageBackend] = {}
+# Workspace 正在处理的调用数（id → 数量）：回收前要等它们跑完，否则读到一半 session 被关
+_inflight: dict[int, int] = {}
+
+
+@contextmanager
+def _in_use(workspace: Workspace | None) -> Iterator[None]:
+    key = id(workspace)
+    _inflight[key] = _inflight.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        left = _inflight.get(key, 1) - 1
+        if left > 0:
+            _inflight[key] = left
+        else:
+            _inflight.pop(key, None)
 
 
 def _signature(agents: Mapping[str, Collection[str]]) -> str:
@@ -193,9 +210,23 @@ def _signature(agents: Mapping[str, Collection[str]]) -> str:
 
 
 def _schedule_close(workspace: Workspace) -> None:
-    """在事件循环里排一次 close；没循环（同步单测）就交给 GC。"""
+    """排一次 close，但先等在途调用结束（最多 60s）。
+
+    原先是直接 `create_task(close_workspace(...))`：TTL/容量回收随时可能把正在跑
+    `read`/`ls` 的 Workspace 关掉，调用方拿到 "session closed" 而不是数据。
+
+    shortcut: 只等 60s，单次调用跑得比这更久仍会被关，那时候该查的是超时而不是池。
+    """
+
+    async def _later() -> None:
+        for _ in range(600):
+            if not _inflight.get(id(workspace)):
+                break
+            await asyncio.sleep(0.1)
+        await close_workspace(workspace)
+
     try:
-        asyncio.get_running_loop().create_task(close_workspace(workspace))
+        asyncio.get_running_loop().create_task(_later())
     except RuntimeError:
         logger.debug("没有事件循环，Workspace 交给 GC")
 
@@ -299,6 +330,7 @@ class MirageBackend(BackendProtocol):
     """
 
     def __init__(self, workspace: Workspace, *, sandbox_id: str, session_id: str) -> None:
+        self._workspace = workspace
         self._inner = LangchainWorkspace(workspace, sandbox_id=sandbox_id, session_id=session_id)
         self._session_id = session_id
 
@@ -323,7 +355,8 @@ class MirageBackend(BackendProtocol):
         return self._inner.download_files(paths)
 
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        return await self._inner.adownload_files(paths)
+        with _in_use(getattr(self, "_workspace", None)):
+            return await self._inner.adownload_files(paths)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return [FileUploadResponse(path=path, error=_WRITE_DENIED) for path, _ in files]
@@ -333,7 +366,8 @@ class MirageBackend(BackendProtocol):
 
     async def als(self, path: str) -> LsResult:  # noqa: D102 —— 见类 docstring
         try:
-            result = await self._inner.als(path)
+            with _in_use(getattr(self, "_workspace", None)):
+                result = await self._inner.als(path)
         except TypeError:
             # hide 掉的前缀：Mirage 内部对 None 做迭代
             return LsResult(entries=[])
@@ -342,7 +376,8 @@ class MirageBackend(BackendProtocol):
         return result
 
     async def aread(self, path: str, offset: int = 0, limit: int = 2000) -> ReadResult:  # noqa: D102
-        result = await self._inner.aread(path, offset=offset, limit=limit)
+        with _in_use(getattr(self, "_workspace", None)):
+            result = await self._inner.aread(path, offset=offset, limit=limit)
         if result is None:
             return ReadResult(error=f"找不到文件: {path}")
         if result.file_data is None and not result.error:
@@ -351,7 +386,8 @@ class MirageBackend(BackendProtocol):
 
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:  # noqa: D102
         try:
-            result = await self._inner.aglob(pattern, path=path)
+            with _in_use(getattr(self, "_workspace", None)):
+                result = await self._inner.aglob(pattern, path=path)
         except TypeError:
             return GlobResult(matches=[])
         if result is None or result.matches is None:
@@ -366,7 +402,8 @@ class MirageBackend(BackendProtocol):
         max_count: int | None = None,
     ) -> GrepResult:  # noqa: D102
         try:
-            result = await self._inner.agrep(pattern, path=path, glob=glob, max_count=max_count)
+            with _in_use(getattr(self, "_workspace", None)):
+                result = await self._inner.agrep(pattern, path=path, glob=glob, max_count=max_count)
         except TypeError:
             return GrepResult(matches=[])
         if result is None or result.matches is None:

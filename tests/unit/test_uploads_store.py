@@ -86,22 +86,24 @@ class TestMaterialize:
         assert uploads.materialize("u1", "t1", "a.md") == uploads.local_path("u1", "t1", "a.md")
         assert uploads.materialize("u1", "t1", "missing.md") is None
 
-    def test_s3_mode_pulls_once(self, local_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_s3_mode_always_repulls(self, local_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """多实例下本地副本可能是别的机器留下的旧字节，所以每次都重新 GET（#6）。"""
         monkeypatch.setattr(app_config, "get", lambda key: {"uploads.dir": str(local_dir), "uploads.store": "s3"}[key])
         monkeypatch.setattr(uploads.blobs, "upload_key", lambda o, t, n: f"uploads/{o}/{t}/{n}")
         calls: list[str] = []
+        bodies = [b"v1", b"v2"]
 
         def fake_get_or_none(key: str):
             calls.append(key)
-            return b"from-s3"
+            return bodies[len(calls) - 1]
 
         monkeypatch.setattr(uploads.blobs, "get_or_none", fake_get_or_none)
         first = uploads.materialize("u1", "t1", "a.xlsx")
-        assert first is not None and first.read_bytes() == b"from-s3"
-        assert calls == ["uploads/u1/t1/a.xlsx"]
+        assert first is not None and first.read_bytes() == b"v1"
         second = uploads.materialize("u1", "t1", "a.xlsx")
         assert second == first
-        assert len(calls) == 1, "第二次读必须命中本地副本，不再打对象存储"
+        assert second.read_bytes() == b"v2", "必须读到对象存储里的新字节"
+        assert len(calls) == 2
 
     def test_s3_mode_missing_object(self, local_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(app_config, "get", lambda key: {"uploads.dir": str(local_dir), "uploads.store": "s3"}[key])
@@ -151,3 +153,30 @@ class TestCleanup:
         uploads.put_stream(io.BytesIO(b"x"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
         (uploads.local_dir("u1", "t1") / ".tmp-halfwritten").write_bytes(b"..")
         assert [(o, t, n) for o, t, n, _ in uploads.iter_local_keys()] == [("u1", "t1", "a.md")]
+
+
+class TestBackup:
+    """覆盖上传先挪走旧字节（issue #7）：台账/提交失败要能换回来。"""
+
+    def test_restore_brings_old_bytes_back(self, local_dir: Path) -> None:
+        uploads.put_stream(io.BytesIO(b"old"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        token = uploads.backup("u1", "t1", "a.md")
+        assert token is not None
+        assert not uploads.local_path("u1", "t1", "a.md").exists(), "备份之后原名不在"
+        assert uploads.local_path("u1", "t1", token).read_bytes() == b"old"
+        uploads.put_stream(io.BytesIO(b"new"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        assert uploads.read_bytes("u1", "t1", "a.md") == b"new"
+
+        uploads.restore("u1", "t1", "a.md", token)
+        assert uploads.read_bytes("u1", "t1", "a.md") == b"old"
+
+    def test_backup_without_old_file_is_none(self, local_dir: Path) -> None:
+        assert uploads.backup("u1", "t1", "missing.md") is None
+
+    def test_drop_backup_leaves_target_alone(self, local_dir: Path) -> None:
+        uploads.put_stream(io.BytesIO(b"old"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        token = uploads.backup("u1", "t1", "a.md")
+        assert token is not None
+        uploads.drop_backup("u1", "t1", token)
+        assert not uploads.local_path("u1", "t1", token).exists()
+        assert uploads.materialize("u1", "t1", "a.md") is None, "旧字节已经挪走，drop 之后不该复活"

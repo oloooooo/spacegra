@@ -26,9 +26,11 @@ key 的形状两种介质刻意保持同构：``<owner>/<thread>/<name>``。对�
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -149,7 +151,7 @@ def put_stream(
             raise UploadTooLarge(str(e)) from e
         except blobs.BlobUnavailable as e:
             raise UploadUnavailable(str(e)) from e
-        # 覆盖同名文件后本地可能还留着旧的副本，删掉让下次读重新取
+        # 覆盖同名文件后本地那份临时副本已经过期，删掉让下次读重新取
         _unlink_quietly(local_path(owner, thread_id, name))
         return key(owner, thread_id, name), sha256, size
 
@@ -169,7 +171,7 @@ def put_stream(
                     out.write(chunk)
         except OSError as e:
             raise UploadUnavailable(f"本地介质写入失败：{e}") from e
-        os.replace(tmp, target)
+        _replace_with_retry(tmp, target)
     except BaseException:
         _unlink_quietly(tmp)
         raise
@@ -188,33 +190,97 @@ def _unlink_quietly(path: Path) -> None:
 # ---------- 读 ----------
 
 
+def _replace_with_retry(tmp: Path, target: Path, attempts: int = 3) -> None:
+    """`os.replace`，Windows 上目标被读句柄占着时重试几次（读端通常很快释放）。"""
+    for left in range(attempts, 0, -1):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            if left == 1:
+                raise OSError("目标文件正被读取，请重试") from None
+            time.sleep(0.05)
+
+
 def materialize(owner: str, thread_id: str, name: str) -> Path | None:
-    """确保字节在本地目录里，返回它的路径；取不到返回 None。
+    """把字节取到本地，返回路径；取不到返回 None。
 
     `fs` 介质：文件本来就在本地，存在即返回。
-    `s3` 介质：本地没有就从对象存储拉一份（同名覆盖时上传侧会先删本地副本）。
+    `s3` 介质：本地那份只是给 pandas/openpyxl 的临时副本，**不能当缓存**——多实例下
+    别的机器覆盖上传后这里永远不会知道。所以每次都重新拉（多一次 GET，换来不读旧字节）。
     """
     target = local_path(owner, thread_id, name)
-    if target.is_file():
-        return target
     if store_mode() != "s3":
-        return None
+        return target if target.is_file() else None
     try:
         data = blobs.get_or_none(blobs.upload_key(owner, thread_id, name))
     except Exception as e:  # noqa: BLE001 - 介质故障不该让读路径抛栈
         logger.warning("upload_materialize_failed", name=name, error=str(e))
         return None
     if data is None:
+        # 对象已经没了：本地那份是过期的，删掉免得继续被读到
+        _unlink_quietly(target)
         return None
     tmp = ensure_dir(target.parent) / f".tmp-{uuid.uuid4().hex}"
     try:
         tmp.write_bytes(data)
-        os.replace(tmp, target)
+        _replace_with_retry(tmp, target)
     except OSError as e:  # pragma: no cover - 磁盘满/权限
         logger.warning("upload_materialize_write_failed", path=str(target), error=str(e))
         _unlink_quietly(tmp)
         return None
     return target
+
+
+# ---------- 覆盖前备份 ----------
+
+_BACKUP_PREFIX = ".bak-"
+
+
+def backup(owner: str, thread_id: str, name: str) -> str | None:
+    """覆盖上传前把旧字节挪到备份位，返回恢复凭据；没有旧字节返回 None。
+
+    fs 用同目录 rename（原子、不额外占空间，`_replace_with_retry` 会处理被占用的情况）；
+    s3 用服务端 copy（不下载），凭据就是同前缀下的备份 key。
+    """
+    token = f"{_BACKUP_PREFIX}{uuid.uuid4().hex}"
+    if store_mode() == "s3":
+        key = blobs.upload_key(owner, thread_id, name)
+        try:
+            blobs.copy(key, blobs.upload_key(owner, thread_id, token))
+        except Exception as e:  # noqa: BLE001 - 没有旧对象（或介质故障）都不算错误
+            logger.info("upload_backup_skipped", name=name, error=str(e))
+            return None
+        return token
+    target = local_path(owner, thread_id, name)
+    if not target.is_file():
+        return None
+    try:
+        _replace_with_retry(target, target.parent / token)
+    except OSError as e:
+        logger.warning("upload_backup_failed", name=name, error=str(e))
+        return None
+    return token
+
+
+def restore(owner: str, thread_id: str, name: str, token: str) -> None:
+    """把备份换回原名（覆盖失败时回滚）。"""
+    if store_mode() == "s3":
+        blobs.copy(blobs.upload_key(owner, thread_id, token), blobs.upload_key(owner, thread_id, name))
+        blobs.delete(blobs.upload_key(owner, thread_id, token))
+        _unlink_quietly(local_path(owner, thread_id, name))
+        return
+    bak = local_path(owner, thread_id, token)
+    if bak.is_file():
+        _replace_with_retry(bak, local_path(owner, thread_id, name))
+
+
+def drop_backup(owner: str, thread_id: str, token: str) -> None:
+    """台账已经落库，备份可以丢了（尽力而为，失败让 reaper 清）。"""
+    if store_mode() == "s3":
+        with contextlib.suppress(Exception):
+            blobs.delete(blobs.upload_key(owner, thread_id, token))
+    _unlink_quietly(local_path(owner, thread_id, token))
 
 
 def read_bytes(owner: str, thread_id: str, name: str) -> bytes | None:
@@ -260,5 +326,5 @@ def iter_local_keys() -> Any:
             if not thread_dir.is_dir():
                 continue
             for path in thread_dir.iterdir():
-                if path.is_file() and not path.name.startswith(".tmp-"):
+                if path.is_file() and not path.name.startswith((".tmp-", _BACKUP_PREFIX)):
                     yield owner_dir.name, thread_dir.name, path.name, path

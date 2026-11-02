@@ -39,6 +39,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -230,9 +231,25 @@ def _configure_s3(con: Any) -> None:
     con.execute(f"SET s3_secret_access_key = {_literal(secret_key)}")
 
 
-def _frames(source: Path, header: int) -> dict[str, Any]:
-    import pandas as pd
+def _frames(source: Path, header: int) -> dict[str, Any] | None:
+    """整本解析成 DataFrame；规模明显超 `xlsx.max_cells` 时返回 None。
 
+    先只读工作簿元数据估规模：`pd.read_excel(sheet_name=None)` 会把所有 sheet 全量
+    装进内存，等 `_MAX_CELLS` 判断时进程可能已经被 OOM 杀掉。
+    """
+    import pandas as pd
+    from openpyxl import load_workbook
+
+    try:
+        book = load_workbook(source, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 - 格式问题交给 pandas 报原始错误
+        return pd.read_excel(source, sheet_name=None, header=header, engine="openpyxl")
+    try:
+        total = sum((ws.max_row or 0) * (ws.max_column or 0) for ws in book.worksheets)
+    finally:
+        book.close()
+    if total > _MAX_CELLS:
+        return None
     return pd.read_excel(source, sheet_name=None, header=header, engine="openpyxl")
 
 
@@ -270,6 +287,8 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
     CPU，调用方应当直接回一句"表太大"，而不是先落一份几 GB 的中间产物。
     """
     frames = _frames(source, header)
+    if frames is None:
+        return None
     con = _connect()
     try:
         sheets: list[dict[str, Any]] = []
@@ -286,7 +305,7 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
             target = store_path(sha256, name, header)
             con.register("staging", frame)
             try:
-                tmp = target.with_suffix(".parquet.tmp")
+                tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
                 tmp.parent.mkdir(parents=True, exist_ok=True)
                 tmp.unlink(missing_ok=True)
                 con.execute(f"COPY staging TO {_literal(tmp.as_posix())} (FORMAT PARQUET, COMPRESSION ZSTD)")
@@ -326,13 +345,21 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
 
 
 def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
-    """读清单。本地没有就看对象存储（多实例共享）；远端也没有就返回 None。"""
+    """读清单。本地没有就看对象存储（多实例共享）；远端也没有就返回 None。
+
+    本地清单命中还要确认每个 sheet 的 parquet 都在——缓存预算淘汰是整组删的，
+    但旧版本按文件删过，可能留下"清单在、数据没了"的目录。
+    """
     path = _manifest_path(sha256, header)
     if path.is_file():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            manifest = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        if _parquet_missing(manifest, sha256, header):
+            shutil.rmtree(path.parent, ignore_errors=True)
+            return None
+        return manifest
     if cache_mode() != "s3":
         return None
     raw = blobs.get_or_none(_remote_manifest_key(sha256, header))
@@ -381,22 +408,36 @@ def prune_remote(older_than_days: float, *, dry_run: bool = False) -> tuple[int,
     return len(victims), total
 
 
+def _parquet_missing(manifest: dict[str, Any], sha256: str, header: int) -> bool:
+    return any(not store_path(sha256, s["name"], header).is_file() for s in manifest.get("sheets") or [])
+
+
 def _enforce_size_limit() -> None:
-    """本机缓存超过预算就按"最久未改动"淘汰，避免把磁盘吃满。"""
+    """本机缓存超过预算就按"最久未改动"整组淘汰（`<sha>/h<n>/` 连清单一起删）。
+
+    只删 parquet 会留下"清单命中、数据缺失"的目录，查询会一直报缺失——组内所有
+    文件同生共死，删掉整组等于下次查询重新解析一次。
+    """
     limit_mb = int(config.get("xlsx.cache_local_max_mb"))
     if limit_mb <= 0:
         return
     root = _derived_dir()
     if not root.is_dir():
         return
-    files = sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime)
-    total = sum(p.stat().st_size for p in files)
+    groups: list[tuple[float, int, Path]] = []
+    for group in root.glob("*/*"):
+        if not group.is_dir():
+            continue
+        files = [p for p in group.rglob("*") if p.is_file()]
+        if files:
+            stats = [(p.stat().st_mtime, p.stat().st_size) for p in files]
+            groups.append((max(m for m, _ in stats), sum(s for _, s in stats), group))
+    total = sum(size for _, size, _ in groups)
     limit = limit_mb * 1024 * 1024
-    for path in files:
+    for _, size, group in sorted(groups):
         if total <= limit:
             break
-        size = path.stat().st_size
-        path.unlink(missing_ok=True)
+        shutil.rmtree(group, ignore_errors=True)
         total -= size
 
 
@@ -609,7 +650,7 @@ def search(sha256: str, keyword: str, sheet: str | None, limit: int, header: int
         for item in targets:
             local = local_parquet(sha256, item["name"], header)
             if local is None:
-                continue
+                raise FileNotFoundError(f"派生缓存缺失：{item['name']}（请删除后重新上传）")
             columns = item["columns"][:_MAX_COLUMNS]
             if not columns:
                 continue

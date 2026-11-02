@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from custom.service import uploads
+from custom.service import uploads as uploads_service
 
 
 class TestSafeName:
@@ -55,3 +56,79 @@ class TestSizeLimit:
             lambda key: {"xlsx.max_blob_mb": 3, "session_files.max_upload_mb": 5}[key],
         )
         assert uploads.size_limit("A.XLSX") == 3 * 1024 * 1024
+
+
+class _FakeSession:
+    """只实现 `save_upload` 用到的那几个方法。"""
+
+    def __init__(self, *, fail_execute: bool = False) -> None:
+        self.fail_execute = fail_execute
+        self.commits = 0
+
+    async def scalar(self, stmt):  # noqa: ANN001, ANN201 - 模拟"同名文件已存在"
+        return "old-sha"
+
+    async def execute(self, stmt):  # noqa: ANN001
+        if self.fail_execute:
+            raise RuntimeError("db down")
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        return None
+
+
+@pytest.fixture
+def fs_store(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    values = {
+        "uploads.dir": str(tmp_path / "uploads"),
+        "uploads.store": "fs",
+        "session_files.max_upload_mb": 10,
+        "xlsx.max_blob_mb": 10,
+        "session_files.max_files_per_session": 50,
+    }
+
+    def fake_get(key: str):
+        return values[key]
+
+    monkeypatch.setattr("custom.service.uploads.config.get", fake_get)
+    monkeypatch.setattr("shared.session.uploads.config.get", fake_get)
+    return tmp_path / "uploads"
+
+
+class TestOverwriteRollback:
+    """覆盖同名文件时台账失败要把旧字节换回来（issue #7）。"""
+
+    async def test_failed_commit_restores_old_bytes(self, fs_store) -> None:
+        uploads = __import__("shared.session.uploads", fromlist=["uploads"])
+
+        uploads.put_stream(__import__("io").BytesIO(b"old"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        session = _FakeSession(fail_execute=True)
+
+        with pytest.raises(RuntimeError):
+            await uploads_service.save_upload(
+                session,
+                owner="u1",
+                thread_id="t1",
+                name="a.md",
+                src=__import__("io").BytesIO(b"new"),
+                spaces=[],
+            )
+
+        assert uploads.read_bytes("u1", "t1", "a.md") == b"old", "旧字节必须还在"
+        assert [p.name for p in uploads.local_path("u1", "t1", "a.md").parent.iterdir()] == ["a.md"]
+
+    async def test_success_replaces_and_drops_backup(self, fs_store) -> None:
+        uploads = __import__("shared.session.uploads", fromlist=["uploads"])
+
+        uploads.put_stream(__import__("io").BytesIO(b"old"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        session = _FakeSession()
+
+        await uploads_service.save_upload(
+            session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"new"), spaces=[]
+        )
+
+        assert session.commits == 1
+        assert uploads.read_bytes("u1", "t1", "a.md") == b"new"
+        assert [p.name for p in uploads.local_path("u1", "t1", "a.md").parent.iterdir()] == ["a.md"]

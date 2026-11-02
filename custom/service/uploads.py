@@ -14,7 +14,9 @@
 
 崩在 1 和 2 之间的后果：多一个没人认领的文件（下次同名上传按覆盖处理），
 比"行说有、字节没有"安全得多；反过来则会出现台账指向不存在的文件。
-所以 2 失败时尽力把 1 写的字节删掉，让状态回到"两边都没有"。
+所以覆盖上传时先把旧字节挪到备份位（`uploads.backup`），台账/提交失败就把旧字节
+换回来；新建（没有旧字节）失败才把刚写的字节删掉。这样"旧文件被冲掉、新文件也没
+落库"这个组合不会出现（issue #7）。
 """
 
 from __future__ import annotations
@@ -111,49 +113,62 @@ async def save_upload(
     if existing is None and await count_files(session, owner, thread_id) >= max_files:
         raise UploadError(f"每个会话最多 {max_files} 个上传文件", 409)
 
+    # 覆盖同名文件会把旧字节冲掉：先挪到备份位，落库失败再换回来（#7）。
+    backup = await asyncio.to_thread(upload_store.backup, owner, thread_id, name)
+
+    async def _revert() -> None:
+        with contextlib.suppress(Exception):
+            if backup is None:
+                await asyncio.to_thread(upload_store.delete, owner, thread_id, name)
+            else:
+                await asyncio.to_thread(upload_store.restore, owner, thread_id, name, backup)
+
     try:
-        key, sha256, size = await asyncio.to_thread(
-            upload_store.put_stream,
-            src,
-            owner=owner,
+        try:
+            key, sha256, size = await asyncio.to_thread(
+                upload_store.put_stream,
+                src,
+                owner=owner,
+                thread_id=thread_id,
+                name=name,
+                max_bytes=limit,
+            )
+        except upload_store.UploadTooLarge as e:
+            raise UploadError(str(e), 413) from e
+        except upload_store.UploadUnavailable as e:
+            raise UploadError("上传存储暂不可用，请稍后重试", 503) from e
+
+        target = route_upload(name, spaces)
+        space = next((s for s in spaces if target == s), "")
+        stmt = pg_insert(SessionObject).values(
+            owner_identity=owner,
             thread_id=thread_id,
             name=name,
-            max_bytes=limit,
+            space=space,
+            target_agent=target,
+            object_key=key,
+            sha256=sha256,
+            size_bytes=size,
         )
-    except upload_store.UploadTooLarge as e:
-        raise UploadError(str(e), 413) from e
-    except upload_store.UploadUnavailable as e:
-        raise UploadError("上传存储暂不可用，请稍后重试", 503) from e
-
-    target = route_upload(name, spaces)
-    space = next((s for s in spaces if target == s), "")
-    stmt = pg_insert(SessionObject).values(
-        owner_identity=owner,
-        thread_id=thread_id,
-        name=name,
-        space=space,
-        target_agent=target,
-        object_key=key,
-        sha256=sha256,
-        size_bytes=size,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["owner_identity", "thread_id", "name"],
-        set_={
-            "space": space,
-            "target_agent": target,
-            "object_key": key,
-            "sha256": sha256,
-            "size_bytes": size,
-        },
-    )
-    try:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["owner_identity", "thread_id", "name"],
+            set_={
+                "space": space,
+                "target_agent": target,
+                "object_key": key,
+                "sha256": sha256,
+                "size_bytes": size,
+            },
+        )
         await session.execute(stmt)
+        # 提交也在 try 里：commit 失败时台账没落库，必须把旧字节换回来（#7）
+        await session.commit()
     except BaseException:
-        # 台账写不进去就不要留孤儿字节（同名覆盖已经把旧字节冲掉了，留着只会更乱）
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(upload_store.delete, owner, thread_id, name)
+        await _revert()
         raise
+    if backup is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(upload_store.drop_backup, owner, thread_id, backup)
 
     logger.info(
         "upload_saved",

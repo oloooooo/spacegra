@@ -233,3 +233,29 @@ def test_local_parquet_returns_existing_file(tmp_path: Path, monkeypatch) -> Non
     path.write_bytes(b"PAR1")
 
     assert duck.local_parquet(SHA, "Sheet1") == path
+
+
+def test_frames_refuses_oversized_workbook_before_parsing(tmp_path: Path, monkeypatch) -> None:
+    """先看规模再解析：`pd.read_excel(sheet_name=None)` 会把整本装进内存（#11）。"""
+    import pandas as pd
+
+    source = tmp_path / "big.xlsx"
+    pd.DataFrame({"a": [1, 2], "b": [3, 4]}).to_excel(source, index=False)
+    monkeypatch.setattr(duck, "_MAX_CELLS", 1)
+
+    assert duck._frames(source, 0) is None
+
+
+def test_size_limit_drops_whole_cache_group(tmp_path: Path, monkeypatch) -> None:
+    """清单和 parquet 必须一起删：只删 parquet 会留下"清单在、数据没了"的目录（#10）。"""
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_local_max_mb": 1}))
+    group = tmp_path / "derived" / SHA / "h0"
+    group.mkdir(parents=True)
+    (group / "manifest.json").write_bytes(b"{}")
+    (group / "Sheet1.parquet").write_bytes(b"x" * (700 * 1024))
+    (group / "Sheet2.parquet").write_bytes(b"x" * (700 * 1024))
+
+    duck._enforce_size_limit()
+
+    assert not group.exists()

@@ -22,7 +22,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # 老数据里可能有指向已删线程的行；FK 建之前先清掉，否则 add_constraint 直接失败
+    # 老数据里可能有指向已删线程的行；FK 建之前先清掉，否则 add_constraint 直接失败。
+    #
+    # 注意：这一句是不可恢复的——只删 `sha256/size/target_agent` 这些台账信息，字节由
+    # reaper 单独清。被删的都是"线程已经不存在"的行，也就是 FK 会级联删掉的那些，所以
+    # 没有活数据损失（issue #9 实测：887 线程 / 18 条台账 / 0 孤儿）；但回滚只能删 FK，
+    # 补不回这些行。
     op.execute(
         """
         DELETE FROM session_object o
