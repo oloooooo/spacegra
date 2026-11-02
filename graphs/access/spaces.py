@@ -62,14 +62,25 @@ def upload_scope(config: Any) -> tuple[str, str]:
 
     子 agent run 的身份是服务账号、线程是自己的子线程，拿不到父会话的上传目录，所以拦截层
     （``graphs/middleware/async_task_guard.py::_config_for``）把父会话的 owner/thread 经
-    ``configurable.upload_owner`` / ``upload_thread`` 转发下来，这里优先读它们。
+    ``configurable.upload_owner`` / ``upload_thread`` 转发下来。**只有服务身份的 run 读这两个键**：
+    主管 run 的 configurable 里可能有客户端写的东西（assistant.config、cron、context 缺省拷贝），
+    主管的上传目录只按当前身份和当前线程算。
 
     没有 thread_id（脚本直跑图）时用 ``no-thread`` 占位：那一轮就是看不到任何上传文件，
     不会误读到别人的目录（owner 仍然不同）。
     """
     cfg = (config or {}).get("configurable") or {}
-    owner = str(cfg.get("upload_owner") or current_identity(config))
-    thread_id = str(cfg.get("upload_thread") or cfg.get("thread_id") or _NO_THREAD)
+    identity = current_identity(config)
+    if identity != SERVICE_IDENTITY:
+        # 主管 run：owner 只能是发起者本人。客户端能把任意键写进 configurable
+        # （assistant.config、cron、``if not context: context = configurable.copy()``），
+        # 一旦信任 upload_owner 就能读别人 ``uploads/<owner>/...`` 下的文件。
+        owner = identity
+        thread_id = str(cfg.get("thread_id") or _NO_THREAD)
+    else:
+        # 子 agent run：拦截层自己写这两个键（不拷客户端 config），可信。
+        owner = str(cfg.get("upload_owner") or identity)
+        thread_id = str(cfg.get("upload_thread") or cfg.get("thread_id") or _NO_THREAD)
     return owner, thread_id
 
 
