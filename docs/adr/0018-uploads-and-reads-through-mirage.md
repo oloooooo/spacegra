@@ -8,8 +8,9 @@
 > `custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py`、
 > `shared/session/blobs.py`（`upload_prefix`/`upload_key`）、`custom/db/models.py`（`target_agent`）、
 > 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `uploads.*`。
-> 取代：[`archive`](../adr/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
-> `feat/unified-files-s3` 分支上的 ADR-0017（同名不同内容）不采用。
+> 取代：[`archive`](./archive/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
+> `feat/unified-files-s3` 分支上的另一份 ADR-0017（与本仓库**已归档**的
+> [0017](./archive/0017-local-backend-scandir.md) 同号不同内容）不采用。
 
 ## 背景
 
@@ -121,17 +122,21 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    同一份表在任何实例上解析结果完全一致，可以跨机共享；表改了、或者用不同表头行号
    查同一份文件，自然换新目录，不用失效逻辑。
 2. **介质用配置切**：`xlsx.cache_mode` = `local`（默认，只落本机）/ `s3`（多实例共享：
-   先查本地、未命中从对象存储拉一份回来）。`s3` 但没配对象存储时自动降级成 `local`，
+   查询时由 DuckDB 直接 `read_parquet('s3://…')` 边读边算，**不依赖本地缓存目录**——
+   任何实例都不必预置或共享磁盘）。`s3` 但没配对象存储时自动降级成 `local`，
    不会因为配置写错而全线报错。**没有 `off`**：不建缓存意味着每次查询重新解析（40 s 级），
    那不是能交给运维去切的旋钮。
 3. **落盘必须原子**：`store.write_atomic`（同目录临时文件 + `os.replace` + 冲突重试）。
    两个 worker 同时建同一张表时字节相同，但直接 `write_bytes` 会让读者拿到半截 Parquet；
    Windows 上 `os.replace` 并发替换同一目标还会回 `PermissionError`，所以"对方已写完就
    接受"。清单（`manifest.json`）最后写，看到清单就说明 parquet 齐全。
-4. **闸门不放松**：`where` 仍是模型写的 SQL 谓词，`_check_where` 禁分号、DDL 与
-   `select`/`read_*`/`glob` 这类表函数（无子查询则调不到表函数），连接再限定
-   `allowed_directories` 且 `lock_configuration`；`columns` 只按清单里的列名过滤。
-   DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这层白名单。
+4. **闸门不放松**：`where` 仍是模型写的 SQL 谓词。两道：`_check_where` 先禁分号、注释与
+   `read_*`/`glob`/`attach` 这类名字；`_check_predicate` 再让 DuckDB 把谓词解析成语法树，
+   按节点白名单放行（列引用、字面量、比较/逻辑运算、少数函数），**子查询、表函数、
+   陌生函数一律拒**。`local` 模式另外关掉 `enable_external_access` 并把 `allowed_directories`
+   限定到派生目录；`s3` 模式要直读对象存储，外部访问必须开着，此时注入面全压在语法树
+   白名单上（ADR-0018 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
+   DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这两层。
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
 派生对象用 `scripts/reap_upload_orphans.py --xlsx-cache-days N --apply` 按 LastModified
@@ -154,7 +159,7 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 
 1. **介质按配置选**：`uploads.store` = `auto`（默认，配了 `s3.endpoint` 就是 `s3`，否则 `fs`）
    / `fs` / `s3`。同一份代码在单机和集群上都跑，切换只改配置，不换分支、不装可选依赖。
-2. **本地读路径不引入 Mirage**：`local` 模式下 `/` 仍是 `SpaceBackend`（ADR-0005 / ADR-0017），
+2. **本地读路径不引入 Mirage**：`local` 模式下 `/` 仍是 `SpaceBackend`（ADR-0005 / [ADR-0017](./archive/0017-local-backend-scandir.md)），
    `/uploads/` 是 `graphs/access/local_backend.py` 的只读 `LocalBackend`，用
    `CompositeBackend` 拼起来。基准（决定 3 与背景）已经说清楚：本地盘上 Mirage 更慢
    （单文件读 0.91ms vs 0.53ms，`grep` 慢 19–38×），没有理由为一致性付这个钱。
@@ -178,7 +183,7 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
   的量化解释器，不能拿到 shell。
 - **两个 S3 client**：`/` 和 `/uploads` 各一个 `S3VFS`（两套连接池），每 run 两个。
 - **只有异步方法**：Mirage 适配层不实现同步 `ls/read/...`，deepagents 侧一律走 `a*`。
-- **本地盘模式读路径没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / ADR-0017），
+- **本地盘模式读路径没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / [ADR-0017](./archive/0017-local-backend-scandir.md)），
   上传目录由 `LocalBackend` 挂在 `/uploads/`（ADR-0018 §9），不上 Mirage。
 - **本地上传目录不是共享存储**：`uploads.store=fs` 下多实例各存各的盘，会话被调度到
   另一台就看不见自己的文件。多实例必须用 `s3`；这一点靠部署文档约束，代码不探测。
@@ -186,10 +191,12 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
   仍是 MB 级；`s3` 模式下对象数随"表 × sheet × header"增长，靠 TTL 回收。
 - **每次都先付解析费**：没有"不物化"的捷径，小表也要写一次 Parquet（20ms 级）。
   这是删掉 SQLite 换来的单一实现代价。
-- **首次查询付解析费**：`s3` 模式下如果本实例没缓存过这张表，要解析 + 上传；
-  冷路径比 `local` 多一次网络往返（实测小文件 8ms / 单 sheet 拉回 34–67ms）。
-- **DuckDB 没有细粒度 authorizer**：`allowed_directories` 挡不住所有表函数，真正的护栏
-  是 `_check_where` 的白名单（禁 `select`/`read_*`/`glob`）。改这块代码要一起改测试。
+- **首次查询付解析费**：任何实例没建过这份派生文件时，要解析 + 上传；`s3` 模式的查询
+  每次走对象存储（列裁剪 + 谓词下推，Range GET），结果集小的时候比读本机盘慢一截，
+  但没有"本地副本过期"这种状态。
+- **DuckDB 没有细粒度 authorizer**：`allowed_directories` 挡不住所有表函数，`s3` 模式下
+  外部访问还必须开着，真正的护栏是 `_check_predicate` 的语法树白名单。改这块代码要
+  一起改测试。
 
 ## 被否决的备选
 

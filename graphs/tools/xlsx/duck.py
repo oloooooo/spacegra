@@ -16,7 +16,9 @@ mtime + size」，跨机器不通用；SQLite 依赖文件锁语义，`cache_dir
 缓存介质（`xlsx.cache_mode`）
 -----------------------------
 ``local`` 只落本机缓存目录（单实例部署，最省事）；
-``s3``    同时写对象存储，任何实例先查本地、未命中再拉远端（多实例/弹性伸缩）；
+``s3``    派生文件写对象存储，查询时由 DuckDB 直接 ``read_parquet('s3://…')`` 边读边算——
+**不依赖本地缓存目录**，多实例/弹性伸缩时任何机器都不需要预置或共享磁盘（本地那份
+只是建缓存时的副产物，命中与否都不影响查询）。
 没有 ``off``：不建缓存意味着每次查询重新解析（80k 行级 40 s），这不是一个
 能交给运维去切的旋钮。
 
@@ -36,9 +38,11 @@ import json
 import re
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from shared import config
 from shared.session import blobs
@@ -58,6 +62,65 @@ _FORBIDDEN_SQL = re.compile(
     r"|select|read_csv|read_csv_auto|read_parquet|parquet_scan|read_json|read_json_auto|read_text|read_blob"
     r"|glob|sniff_csv)\b",
     re.IGNORECASE,
+)
+# 谓词的语法树白名单：只放行列引用、字面量与比较/逻辑运算（`_check_predicate`）。
+_ALLOWED_NODES = frozenset(
+    {
+        "SELECT_NODE",
+        "EMPTY",
+        "ORDER_MODIFIER",
+        "TYPE",
+        "COLUMN_REF",
+        "STAR",
+        "VALUE_CONSTANT",
+        "COMPARE_EQUAL",
+        "COMPARE_NOTEQUAL",
+        "COMPARE_LESSTHAN",
+        "COMPARE_GREATERTHAN",
+        "COMPARE_LESSTHANOREQUALTO",
+        "COMPARE_GREATERTHANOREQUALTO",
+        "COMPARE_DISTINCT_FROM",
+        "COMPARE_NOT_DISTINCT_FROM",
+        "COMPARE_IN",
+        "COMPARE_BETWEEN",
+        "CONJUNCTION_AND",
+        "CONJUNCTION_OR",
+        "OPERATOR_IS_NULL",
+        "OPERATOR_IS_NOT_NULL",
+        "OPERATOR_NOT",
+        "OPERATOR_CAST",
+        "OPERATOR_COALESCE",
+        "FUNCTION",
+    }
+)
+# LIKE 在语法树里是 `~~`，拼接是 `||`，算术也是 FUNCTION：一律按名字放行。
+_ALLOWED_FUNCTIONS = frozenset(
+    {
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "||",
+        "~~",
+        "!~~",
+        "~~*",
+        "!~~*",
+        "lower",
+        "upper",
+        "length",
+        "trim",
+        "ltrim",
+        "rtrim",
+        "abs",
+        "round",
+        "ceil",
+        "floor",
+        "substr",
+        "substring",
+        "strftime",
+        "date_trunc",
+    }
 )
 
 
@@ -117,22 +180,48 @@ def sha256_file(path: Path) -> str:
 
 
 def _connect():  # noqa: ANN202 —— duckdb 的类型在可选依赖里
-    """内存库 + 关外部访问 + 限制可访问目录 + 锁配置。
+    """内存库 + 锁配置；`local` 模式再关掉外部访问、只留派生目录。
 
-    `where` 是模型写的谓词，是最外层的注入面。三层护栏：`_check_where` 禁掉分号与
-    注释符；连接把 `enable_external_access` 关掉——只留 `allowed_directories` 这一个
-    口子，`read_text`/`glob`/`read_csv` 这些表函数即使被调进来也读不到禁止目录；
-    列名一律先按清单过滤再 `_ident` 转义，不拼接模型给的任意标识符。
+    `where` 是模型写的谓词，是最外层的注入面。护栏分两层：`_check_predicate` 先做
+    文本检查、再按语法树白名单把关（子查询/表函数/陌生函数一律拒）；连接层在
+    `local` 模式下把 `enable_external_access` 关掉，`read_text`/`glob`/`read_csv`
+    即使被调进来也读不到禁止目录。
+
+    `s3` 模式下外部访问必须开着（DuckDB 要直读对象存储），此时本地/远端文件访问
+    只能靠语法树闸门拦住——这是刻意的取舍：多主机不依赖缓存目录，代价是注入面
+    全部压在谓词校验上。
     """
     import duckdb
 
     con = duckdb.connect(":memory:")
-    # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
-    # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。
-    con.execute(f"SET allowed_directories = [{_literal(_derived_dir().as_posix())}]")
-    con.execute("SET enable_external_access = false")
+    if cache_mode() == "s3":
+        _configure_s3(con)
+    else:
+        # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
+        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。
+        con.execute(f"SET allowed_directories = [{_literal(_derived_dir().as_posix())}]")
+        con.execute("SET enable_external_access = false")
     con.execute("SET lock_configuration = true")
     return con
+
+
+def _configure_s3(con: Any) -> None:
+    """让 DuckDB 直接读对象存储，凭证与 boto3 共用一份。
+
+    SeaweedFS/MinIO 一律 path style（``bucket.endpoint`` 解析不了，和 boto3 那边同一个
+    理由）。httpfs 扩展首次用会自动下载，内网需预置。
+    """
+    endpoint = str(config.get("s3.endpoint") or "").strip()
+    if not endpoint:
+        return
+    parsed = urlsplit(endpoint if "//" in endpoint else f"https://{endpoint}")
+    con.execute(f"SET s3_endpoint = {_literal(parsed.netloc or parsed.path)}")
+    con.execute(f"SET s3_use_ssl = {'true' if parsed.scheme == 'https' else 'false'}")
+    con.execute("SET s3_url_style = 'path'")
+    con.execute(f"SET s3_region = {_literal(str(config.get('s3.region') or '').strip() or 'us-east-1')}")
+    access_key, secret_key = blobs.credentials()
+    con.execute(f"SET s3_access_key_id = {_literal(access_key)}")
+    con.execute(f"SET s3_secret_access_key = {_literal(secret_key)}")
 
 
 def _frames(source: Path, header: int) -> dict[str, Any]:
@@ -304,18 +393,16 @@ def _enforce_size_limit() -> None:
 # ---------- 取本地 parquet ----------
 
 
-def local_parquet(sha256: str, sheet: str, header: int = 0) -> Path | None:
-    """本地有点就直接用；s3 模式下没有再去远端拉一份回来。"""
+def local_parquet(sha256: str, sheet: str, header: int = 0) -> Path | str | None:
+    """派生 parquet 的读取位置：`s3` 模式给 `s3://` 地址，本地模式给本机路径。
+
+    s3 模式不再拉回本地——多主机共享同一份对象，不必预置/同步缓存目录（也顺带
+    去掉了「本地副本比远端旧」的问题）；本地那份只是建缓存时的副产物。
+    """
+    if cache_mode() == "s3":
+        return f"s3://{blobs.bucket()}/{remote_key(sha256, sheet, header)}"
     path = store_path(sha256, sheet, header)
-    if path.is_file():
-        return path
-    if cache_mode() != "s3":
-        return None
-    raw = blobs.get_or_none(remote_key(sha256, sheet, header))
-    if raw is None:
-        return None
-    store.write_atomic(path, raw)
-    return path
+    return path if path.is_file() else None
 
 
 # ---------- SQL ----------
@@ -330,7 +417,8 @@ def _ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def _source(path: Path) -> str:
+def _source(path: Path | str) -> str:
+    """`read_parquet()` 的实参：本地路径或 `s3://` 地址都走同一条路。"""
     return f"read_parquet({_literal(str(path))})"
 
 
@@ -364,6 +452,38 @@ def _check_where(where: str) -> str:
     if ";" in text or "--" in text or "/*" in text or _FORBIDDEN_SQL.search(text):
         raise ValueError("where 只能是筛选谓词，不能包含分号、注释或 DDL/多条语句")
     return text
+
+
+def _check_predicate(con: Any, where: str) -> str:
+    """文本闸门 + 语法树白名单：不许子查询、表函数和白名单外的函数。
+
+    文本黑名单挡不住 ``EXISTS (FROM query('FROM read_text(…'))`` 这种拼法；这里让
+    DuckDB 自己解析成语法树，按节点类型放行——s3 模式外部访问开着，这是唯一能挡住
+    `read_text('/etc/passwd')` 的闸门。
+    """
+    text = _check_where(where)
+    raw = con.execute("SELECT json_serialize_sql(?)", [f"SELECT 1 WHERE {text}"]).fetchone()[0]
+    ast = json.loads(raw)
+    if ast.get("error"):
+        raise ValueError(f"where 无法解析：{ast.get('error_message')}")
+    for node, name in _nodes(ast):
+        if node not in _ALLOWED_NODES:
+            raise ValueError(f"where 不支持 {node.lower()} 表达式")
+        if node == "FUNCTION" and name not in _ALLOWED_FUNCTIONS:
+            raise ValueError(f"where 不支持函数 {name}()")
+    return text
+
+
+def _nodes(node: Any) -> Iterator[tuple[str, str]]:
+    if isinstance(node, dict):
+        kind = node.get("type")
+        if kind:
+            yield str(kind), str(node.get("function_name") or "")
+        for value in node.values():
+            yield from _nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _nodes(value)
 
 
 def _format_value(value: Any) -> str:
@@ -448,11 +568,11 @@ def query(
     selected = [c for c in (columns or []) if c in target["columns"]]
     unknown = [c for c in (columns or []) if c not in target["columns"]]
     projection = ", ".join(_ident(c) for c in selected) if selected else "*"
-    predicate = f" WHERE {_check_where(where)}" if where else ""
     size = min(max(int(limit), 1), _MAX_ROWS)
     start = max(int(offset), 0)
     con = _connect()
     try:
+        predicate = f" WHERE {_check_predicate(con, where)}" if where else ""
         total = int(_rows(con, f"SELECT count(*) FROM {_source(local)}{predicate}")[0][0])
         rows = _rows(con, f"SELECT {projection} FROM {_source(local)}{predicate} LIMIT {size} OFFSET {start}")
     finally:

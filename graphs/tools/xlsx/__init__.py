@@ -17,8 +17,9 @@ agent 视角::
     xlsx_profile(path)                                # 空值/重复/类型/数值范围画像
 
 为什么必须先物化：80k×10×3 的表现在一次全读 41.7 s，转成列式文件后 `WHERE … LIMIT 200`
-是 2 ms。派生缓存放本机还是对象存储（多实例共享）由 `xlsx.cache_mode` 决定；它是
-可重建的中间产物，不是真相——删了只会让下次查询多解析一遍（ADR-0018 §8）。
+是 2 ms。派生缓存放本机还是对象存储由 `xlsx.cache_mode` 决定（`s3` 模式查询直接读
+对象存储，多实例不必共享磁盘）；它是可重建的中间产物，不是真相——删了只会让下次
+查询多解析一遍（ADR-0018 §8）。
 """
 
 import asyncio
@@ -198,6 +199,8 @@ async def xlsx_query(
     2. 空值用 `IS NULL` / `IS NOT NULL`，**`!=` 会漏掉空值行**（SQL 里 NULL 参与比较不成立）；
     3. 不支持 `@变量`、`.str.xxx`、`~` 取反这类 pandas 写法。
     其余（`> < >= <= = != and or in between like`）照常。
+    函数只支持 `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/substr/strftime/date_trunc`
+    与算术/拼接运算符；**不支持子查询、表函数和其余函数**（会被守卫拒绝）。
 
     Args:
         path: xlsx 虚拟路径，如 /空间名/文件.xlsx
