@@ -41,6 +41,11 @@ xlsx:
   max_blob_mb_per_user: 2048    # 每用户二进制总量（2GB）；当前无入口，保留
   cache_dir: .cache/xlsx        # 派生缓存与下载字节的本机目录，必须在 okf.dir（knowledge/）之外
   query_budget_ms: 5000         # 单次 where 查询的 CPU 预算，超了 interrupt()
+  # where 谓词的校验强度。strict = 语法树白名单（只放行筛选/比较/少量函数，
+  # 见 graphs/tools/xlsx/duck.py 的 _ALLOWED_NODES/_ALLOWED_FUNCTIONS）；
+  # free = 只拦多条语句与注释，谓词原样交给 DuckDB —— 等于允许子查询、表函数，
+  # s3 模式下就能读到凭证可达的任意对象，只在完全可信的环境里改。
+  sql_policy: strict
   # 表第一次被查时按 sheet 转成 Parquet（内容哈希 + header 决定目录），之后走 DuckDB。
   cache_mode: local             # local = 只落本机；s3 = 写对象存储且查询直读（多实例无需本地缓存目录）
   cache_prefix: xlsx-derived    # cache_mode=s3 时的对象前缀（内容寻址，可随时清）
