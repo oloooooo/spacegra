@@ -18,8 +18,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 
@@ -83,6 +85,15 @@ def _iter_local_prefixes() -> dict[str, list[dict]]:
     return out
 
 
+def _live_prefixes(rows: Iterable[Any]) -> tuple[set[str], set[str]]:
+    """台账里的活跃前缀 → ``(本地形状 <owner>/<thread>/，s3 形状 uploads/<owner>/<thread>/)``。"""
+    pairs = [(str(row[0]), str(row[1])) for row in rows]
+    return (
+        {f"{owner}/{thread}/" for owner, thread in pairs},
+        {blobs.upload_prefix(owner, thread) for owner, thread in pairs},
+    )
+
+
 def _local_orphans(live: set[str], cutoff: datetime) -> tuple[list[str], int, int]:
     """本地介质里该删的前缀 → `(前缀列表, 文件数, 字节数)`。"""
     prefixes: list[str] = []
@@ -120,10 +131,12 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
     maker = get_session_maker()
     async with maker() as session:
         rows = (await session.execute(select(SessionObject.owner_identity, SessionObject.thread_id))).all()
-    live = {f"{owner}/{thread}/" for owner, thread in rows}
+    # 本地前缀是 ``<owner>/<thread>/``，s3 前缀是 ``uploads/<owner>/<thread>/``——
+    # 两套形状共用一份 live 集合时 s3 分支永远不命中，所有 prefix 都会被当孤儿删掉。
+    live_local, live_s3 = _live_prefixes(rows)
 
     for prefix, objects in prefixes.items():
-        if prefix in live:
+        if prefix in live_s3:
             report.live_prefixes += 1
             continue
         fresh = [o for o in objects if o.get("LastModified") and o["LastModified"] >= cutoff]
@@ -133,7 +146,7 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
         report.orphan_objects += len(objects)
         report.orphan_bytes += sum(int(o.get("Size") or 0) for o in objects)
 
-    local_prefixes, local_objects, local_bytes = _local_orphans(live, cutoff)
+    local_prefixes, local_objects, local_bytes = _local_orphans(live_local, cutoff)
     report.local_prefixes = local_prefixes
     report.local_objects = local_objects
     report.local_bytes = local_bytes
@@ -175,7 +188,7 @@ def main() -> None:
         deleted = blobs.delete_prefix(prefix)
         print(f"  已删 {prefix} → {deleted} 个对象")
     for prefix in report.local_prefixes:
-        owner, thread, _ = prefix.rstrip("/").split("/")
+        owner, thread = prefix.rstrip("/").split("/")[:2]
         uploads.delete_thread(owner, thread)
         print(f"  已删本地 {prefix}")
 
