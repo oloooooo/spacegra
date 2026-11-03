@@ -27,7 +27,7 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import for_agent, workspace_for
+from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
 from graphs.access.spaces import allowed_spaces, upload_scope
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
@@ -54,7 +54,7 @@ def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backen
     if config.get("okf.backend") != "s3fs" or not space:
         return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
-    workspace = workspace_for(owner=owner, thread_id=thread_id, agents={space: (space,)})
+    workspace = build_workspace(owner=owner, thread_id=thread_id, agents={space: (space,)})
     return for_agent(workspace, space)
 
 
@@ -79,12 +79,16 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
     # 子 run 转终态 -> finalize_run 写发件箱行 -> 分发者在父线程空闲时开一轮唤醒 run。
     # 子图不再需要任何通知中间件。
 
-    return create_deep_agent(
-        model=model,
-        system_prompt=system_prompt,
-        tools=tools,
-        middleware=middleware,
-        # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
-        backend=space_backend(config),
-        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+    backend = space_backend(config)
+    return run_scope(
+        create_deep_agent(
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            middleware=middleware,
+            # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
+            backend=backend,
+            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+        ),
+        backend,
     )

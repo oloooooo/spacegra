@@ -25,7 +25,7 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import for_agent, workspace_for
+from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
 from graphs.access.spaces import upload_scope
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
@@ -42,24 +42,28 @@ def xlsx_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend
     if config.get("okf.backend") != "s3fs":
         return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
-    workspace = workspace_for(owner=owner, thread_id=thread_id, agents={XLSX_AGENT: ()})
+    workspace = build_workspace(owner=owner, thread_id=thread_id, agents={XLSX_AGENT: ()})
     return for_agent(workspace, XLSX_AGENT)
 
 
 def graph(config_: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的图
     """建通用表格子 agent。"""
-    return create_deep_agent(
-        model=model,
-        system_prompt=XLSX_SYSTEM_PROMPT,
-        tools=[],
-        middleware=[
-            CodeInterpreterMiddleware(
-                mode="turn",
-                ptc=XLSX_TOOLS,  # pyright: ignore[reportArgumentType]
-                timeout=120,
-                max_result_chars=10000,
-            )
-        ],
-        backend=xlsx_backend(config_),
-        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+    backend = xlsx_backend(config_)
+    return run_scope(
+        create_deep_agent(
+            model=model,
+            system_prompt=XLSX_SYSTEM_PROMPT,
+            tools=[],
+            middleware=[
+                CodeInterpreterMiddleware(
+                    mode="turn",
+                    ptc=XLSX_TOOLS,  # pyright: ignore[reportArgumentType]
+                    timeout=120,
+                    max_result_chars=10000,
+                )
+            ],
+            backend=backend,
+            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+        ),
+        backend,
     )

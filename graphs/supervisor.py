@@ -25,7 +25,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain.tools import InjectedToolArg, ToolRuntime, tool
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import for_agent, workspace_for
+from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
 from graphs.access.spaces import allowed_spaces, upload_scope
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.middleware.async_task_guard import AsyncTaskGuard
@@ -126,7 +126,7 @@ def supervisor_backend(config: RunnableConfig):  # noqa: ANN201 —— 两种 ba
         return filesystem_backend(config)
     owner, thread_id = upload_scope(config)
     logger.info("mirage_backend", owner=owner, thread_id=thread_id)
-    workspace = workspace_for(
+    workspace = build_workspace(
         owner=owner,
         thread_id=thread_id,
         agents={MAIN_AGENT: _visible_spaces(config), XLSX_AGENT: ()},
@@ -137,23 +137,27 @@ def supervisor_backend(config: RunnableConfig):  # noqa: ANN201 —— 两种 ba
 def graph(config: RunnableConfig):  # noqa: ANN201 — 返回编译后的图
     """主管图（工厂图）：子 agent 名单每次 run 现算，见 domain_specs。"""
     specs = domain_specs(config)
-    return create_deep_agent(
-        model=model,
-        system_prompt=MAIN_SYSTEM_PROMPT,
-        # xlsx 工具不在主 agent 手里：主 agent 能看见所有上传文件，但表格分析一律派给
-        # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0018。
-        tools=[*MAIN_TOOLS],
-        # 按空间隔离的 backend（ADR-0005 / ADR-0018）
-        backend=supervisor_backend(config),
-        context_schema=deepAgentContext,
-        # 拆任务清单（write_todos）；guard 拦截 start/update_async_task：按 spec 绑定的
-        # space 经 run config 转发给子 agent（ADR-0005）+ 并发上限
-        middleware=[
-            TodoListMiddleware(),
-            AsyncTaskGuard(specs),
-        ],
-        subagents=[*specs.values()],
-        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+    backend = supervisor_backend(config)
+    return run_scope(
+        create_deep_agent(
+            model=model,
+            system_prompt=MAIN_SYSTEM_PROMPT,
+            # xlsx 工具不在主 agent 手里：主 agent 能看见所有上传文件，但表格分析一律派给
+            # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0018。
+            tools=[*MAIN_TOOLS],
+            # 按空间隔离的 backend（ADR-0005 / ADR-0018）
+            backend=backend,
+            context_schema=deepAgentContext,
+            # 拆任务清单（write_todos）；guard 拦截 start/update_async_task：按 spec 绑定的
+            # space 经 run config 转发给子 agent（ADR-0005）+ 并发上限
+            middleware=[
+                TodoListMiddleware(),
+                AsyncTaskGuard(specs),
+            ],
+            subagents=[*specs.values()],
+            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
+        ),
+        backend,
     )
 
 

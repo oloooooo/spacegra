@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from deepagents.backends.protocol import FileDownloadResponse
+from mirage import Workspace
+from mirage.accessor.pool import LoopClientCache
 
+import graphs.access.mirage_backend as mb
 from graphs.access.mirage_backend import (
     SHARED_ROOT_FILES,
     UPLOADS_MOUNT,
@@ -140,3 +144,52 @@ class TestNormalisation:
 
     def test_other_members_still_delegate(self) -> None:
         assert self._backend()._inner is not None
+
+
+class TestRunScope:
+    """工厂返回的代理：`async with` 交出原图，退出时关 Workspace。"""
+
+    async def test_mirage_backend_is_wrapped_and_closed(self, monkeypatch) -> None:  # noqa: ANN001
+        closed: list[object] = []
+
+        async def fake_close(workspace: object) -> None:
+            closed.append(workspace)
+
+        monkeypatch.setattr(mb, "close_workspace", fake_close)
+        workspace = object.__new__(Workspace)  # isinstance 通过，不真构造（不需要 S3）
+        graph = object()
+
+        scope = mb.run_scope(graph, SimpleNamespace(_workspace=workspace))
+        assert isinstance(scope, mb._RunScope)
+        async with scope as inner:
+            assert inner is graph
+        assert closed == [workspace]
+
+    def test_local_backend_passes_through(self) -> None:
+        graph = object()
+        assert mb.run_scope(graph, SimpleNamespace()) is graph
+        assert mb.run_scope(graph, SimpleNamespace(_workspace=object())) is graph
+
+
+class TestSharedClients:
+    async def test_two_accessors_share_one_client(self, monkeypatch) -> None:  # noqa: ANN001
+        monkeypatch.setattr(mb, "_CLIENTS", LoopClientCache("s3"))
+        calls = 0
+
+        class _Manager:
+            async def __aenter__(self) -> object:
+                nonlocal calls
+                calls += 1
+                return object()
+
+            async def __aexit__(self, *_exc: object) -> None:
+                return None
+
+        def factory() -> _Manager:
+            return _Manager()
+
+        first = object.__new__(mb._SharedAccessor)
+        second = object.__new__(mb._SharedAccessor)
+        assert await first.cached_client(factory) is await second.cached_client(factory)
+        assert calls == 1
+        assert await first.close() is None  # 共用 client 不能被单个 VFS 关掉
