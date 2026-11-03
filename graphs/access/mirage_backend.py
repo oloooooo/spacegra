@@ -5,9 +5,9 @@
 
 三个不能改的约定：
 
-- **一个 run 一个 Workspace**：`Workspace(mounts=..., profiles=...)` 的构造 + 首次 LIST 约
-  400ms（探针实测），所以按 run 建一次、run 内复用；`graphs/*.py` 的 `graph(config)` 本来就是
-  每请求调用一次，天然符合。
+- **一个 run 一个 Workspace**：Workspace 构造只要 ~1ms，贵的是每个新 S3VFS 的第一次操作
+  （~160ms，botocore 每次重扫服务模型）。所以 S3 客户端进程级共用一份（`_CLIENTS`），
+  Workspace 每 run 现建，由 `run_scope` 挂在图的 `async with` 上关掉。
 - **一个 agent 一个 session**：隔离只能通过 `create_session(profile=...)` 的 hide/show 表达。
   inline `permissions` **不允许** `show`（Mirage `refuse_show`），所以可见范围必须是具名 profile。
 - **授权 = hide 根 + show 子树**：`hide ["/"]` 配 `show ["/空间A", "/uploads"]` 就是一个
@@ -22,10 +22,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import logging
-import time
 from collections.abc import Collection, Mapping
 from typing import Any
 
@@ -41,6 +38,8 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 from mirage import Workspace
+from mirage.accessor.pool import LoopClientCache
+from mirage.accessor.s3 import S3Accessor
 from mirage.agents.langchain import LangchainWorkspace
 from mirage.types import MountMode
 from mirage.vfs.s3 import S3VFS, S3Config
@@ -110,6 +109,33 @@ def _cache_and_index(scope: str) -> dict[str, Any]:
     }
 
 
+# ---------- 共用的 S3 客户端 ----------
+#
+# 每个新 S3VFS 都新建一个 aioboto3 client，而 client 的**第一次操作**要 ~160ms（botocore
+# 重扫自己的服务模型目录，Windows 上尤其贵）。client 与租户无关——前缀在 accessor 的 config
+# 里——所以整进程共用一份：每个 run 只剩 Workspace/session 的 ~1ms。
+
+_CLIENTS: LoopClientCache[Any] = LoopClientCache("s3")
+
+
+class _SharedAccessor(S3Accessor):
+    """client 走进程级缓存；`close()` 什么都不做——关它的时机是进程退出。"""
+
+    async def cached_client(self, factory: Any) -> Any:
+        return await _CLIENTS.get(factory)
+
+    async def close(self) -> None:
+        return None
+
+
+class _SharedVFS(S3VFS):
+    """`S3VFS` 的 accessor 换成共用 client 的那份（key_prefix 仍各用各的）。"""
+
+    def __init__(self, cfg: S3Config) -> None:
+        super().__init__(cfg)
+        self.accessor = _SharedAccessor(cfg)
+
+
 # ---------- Workspace ----------
 
 
@@ -132,15 +158,17 @@ def agent_profiles(agents: Mapping[str, Collection[str]]) -> dict[str, dict[str,
 def build_workspace(*, owner: str, thread_id: str, agents: Mapping[str, Collection[str]]) -> Workspace:
     """一个 run 的 Workspace：`/`=知识空间，`/uploads`=本会话的上传文件。
 
-    两个 mount 各用一个 `S3VFS`（各一条 aiohttp 连接池），由 `Workspace.close()` 一起关。
+    两个 mount 各一个 `S3VFS`，共用进程级的 S3 客户端；`Workspace.close()` 关时不会
+    连带关掉那份共用的 client。
     """
     if not owner or not thread_id:
         raise ValueError("owner 与 thread_id 都不能为空：它们是上传目录的隔离键")
+    uploads.validate()  # s3fs 只看得见对象存储里的 uploads/，介质配错就抬错（ADR-0018 §9）
 
     scope = f"{identity_digest(owner)}-{thread_id}"
     mounts = {
-        "/": S3VFS(_s3_config(OKF_PREFIX)),
-        UPLOADS_MOUNT: S3VFS(_s3_config(f"{UPLOADS_PREFIX}/{owner}/{thread_id}")),
+        "/": _SharedVFS(_s3_config(OKF_PREFIX)),
+        UPLOADS_MOUNT: _SharedVFS(_s3_config(f"{UPLOADS_PREFIX}/{owner}/{thread_id}")),
     }
     return Workspace(
         mounts=mounts,
@@ -158,91 +186,61 @@ async def close_workspace(workspace: Workspace | None) -> None:
     """
     if workspace is None:
         return
-    _drop_agent_backends(workspace)
     try:
         await workspace.close()
     except Exception:  # noqa: BLE001 —— 收尾失败不该让已成功的请求变 500
         logger.warning("关闭 Mirage Workspace 失败", exc_info=True)
 
 
-def _drop_agent_backends(workspace: Workspace) -> None:
-    """Workspace 回收时丢掉它的 backend 缓存（key 用 id，id 会被后续对象复用）。"""
-    prefix = f"{id(workspace)}:"
-    for key in [k for k in _agent_backends if k.startswith(prefix)]:
-        _agent_backends.pop(key, None)
-
-
-# ---------- 每会话的 Workspace 池 ----------
+# ---------- run 的生命周期 ----------
 #
-# 构造 + 首次 LIST 约 400ms，同一条线程连着几轮对话没必要每次重建；建一次、按 TTL 回收。
-# 用池而不是“run 结束就关”：工厂图拿不到 run 的收尾钩子（aegra 只是 `async with` 一下把图
-# 交出去），没地方 await close，硬关只能靠 GC（aiohttp 会报 Unclosed session）。
-# key 里带 owner 摘要 + thread_id：不同用户/会话永远不共用。
-
-_POOL_MAX = 8
-_POOL_TTL_SECONDS = 300.0
-_pool: dict[str, tuple[Workspace, float]] = {}
-_agent_backends: dict[str, MirageBackend] = {}
+# Workspace 持有 aiohttp/Redis 连接（1 个文件缓存 + 每 mount 1 个索引 store），只有 `close()`
+# 会释放。`src/` 的 run 执行器没给图代码收尾钩子，但它把工厂的返回值交给 `async with`
+# （`generate_graph` 认 async context manager）。所以工厂返回下面这个代理：进 run 时交出图，
+# run 结束时关 Workspace。少了这层，每 run 会漏一份文件缓存（有界池删掉之后，那就是按 run
+# 增长的泄漏，比 #5 更糟）。
 
 
-def _signature(agents: Mapping[str, Collection[str]]) -> str:
-    """可见范围的指纹，进池 key：profile 是构造期参数，范围不同就是另一个 Workspace。"""
-    raw = "|".join(f"{name}:{','.join(sorted(spaces))}" for name, spaces in sorted(agents.items()))
-    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+class _RunScope:
+    """图的包装：其余成员原样透传，只在 `async with` 退出时关 Workspace。"""
+
+    def __init__(self, graph: Any, workspace: Workspace) -> None:
+        self._graph = graph
+        self._workspace = workspace
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._graph, item)
+
+    async def __aenter__(self) -> Any:
+        return self._graph
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await close_workspace(self._workspace)
 
 
-def _schedule_close(workspace: Workspace) -> None:
-    """在事件循环里排一次 close；没循环（同步单测）就交给 GC。"""
-    try:
-        asyncio.get_running_loop().create_task(close_workspace(workspace))
-    except RuntimeError:
-        logger.debug("没有事件循环，Workspace 交给 GC")
-
-
-def _sweep(now: float) -> None:
-    """回收过期的，再按容量踢最旧的。"""
-    for key, (workspace, last_used) in list(_pool.items()):
-        if now - last_used > _POOL_TTL_SECONDS:
-            _pool.pop(key, None)
-            _schedule_close(workspace)
-    while len(_pool) > _POOL_MAX:
-        oldest = min(_pool, key=lambda k: _pool[k][1])
-        workspace, _ = _pool.pop(oldest)
-        _schedule_close(workspace)
-
-
-def workspace_for(*, owner: str, thread_id: str, agents: Mapping[str, Collection[str]]) -> Workspace:
-    """取本会话 + 本可见范围的 Workspace（池里命中就复用）。"""
-    key = f"{identity_digest(owner)}:{thread_id}:{_signature(agents)}"
-    now = time.monotonic()
-    entry = _pool.pop(key, None)
-    if entry is not None:
-        _pool[key] = (entry[0], now)  # 命中：刷新 LRU 顺序
-        return entry[0]
-
-    workspace = build_workspace(owner=owner, thread_id=thread_id, agents=agents)
-    _pool[key] = (workspace, now)
-    _sweep(now)
-    return workspace
+def run_scope(graph: Any, backend: Any) -> Any:
+    """把 backend 里那个 Workspace 绑到 run 的生命周期上；本地磁盘 backend 原样返回。"""
+    workspace = getattr(backend, "_workspace", None)
+    return _RunScope(graph, workspace) if isinstance(workspace, Workspace) else graph
 
 
 async def close_all_workspaces() -> None:
-    """服务退出时把池里的 Workspace 全关掉（aiohttp session 跟着关）。
+    """服务退出时关掉共用的 S3 客户端（Workspace 已在各自 run 结束时关掉）。
 
-    不关也不会丢数据（都是只读），但会在日志里刷 `Unclosed client session`，
-    连接池也会一直吊着。挂到 FastAPI 的 lifespan shutdown。
+    不关也不会丢数据（都是只读），但会在日志里刷 `Unclosed client session`。
+    挂到 FastAPI 的 lifespan shutdown。
     """
-    while _pool:
-        _, (workspace, _) = _pool.popitem()
-        await close_workspace(workspace)
-    _agent_backends.clear()
+    try:
+        await _CLIENTS.close()
+    except Exception:  # noqa: BLE001 —— 收尾失败不该让退出流程失败
+        logger.warning("关闭共用的 S3 客户端失败", exc_info=True)
 
 
 def for_agent(workspace: Workspace, agent: str) -> MirageBackend:
     """给某个 agent 开个 session 并包成 backend（同名 session 重复创建是幂等的）。"""
     try:
         workspace.create_session(agent, profile=agent)
-    except Exception:  # noqa: BLE001 —— 池里复用时会撞上已存在的 session
+    except Exception:  # noqa: BLE001 —— 同一 Workspace 上重复调用会撞上已存在的 session
         logger.debug("session 已存在，直接复用", extra={"agent": agent})
     return MirageBackend(workspace, sandbox_id=f"mirage-{agent}", session_id=agent)
 
@@ -250,9 +248,9 @@ def for_agent(workspace: Workspace, agent: str) -> MirageBackend:
 async def download_bytes(run_config: Any, path: str) -> bytes | None:
     """按本 run 的身份/线程把虚拟路径的文件取回来（给读不了 HTTP 的本地工具用）。
 
-    作用域与图完全一致：同一个池化 Workspace + 同一套 profile，所以工具能拿到的东西不会
-    超过 agent 自己能 `read` 的范围。agent 名从 run config 反推：空间子 run 的
-    ``user_spaces`` 只有它自己那一个；通用表格子 agent 是空列表。
+    作用域与图完全一致：同一个 Workspace + 同一套 profile，所以工具能拿到的东西不会超过
+    agent 自己能 `read` 的范围。agent 名从 run config 反推：空间子 run 的 ``user_spaces``
+    只有它自己那一个；通用表格子 agent 是空列表。
     """
     from graphs.access.spaces import allowed_spaces, upload_scope
     from shared.session.upload_rule import XLSX_AGENT
@@ -263,26 +261,18 @@ async def download_bytes(run_config: Any, path: str) -> bytes | None:
     agents: dict[str, tuple[str, ...]] = {agent: tuple(names)}
 
     owner, thread_id = upload_scope(run_config)
-    workspace = workspace_for(owner=owner, thread_id=thread_id, agents=agents)
-    backend = _agent_backend(workspace, agent)
-    resp = await backend.adownload_files([path])
-    item = resp[0] if resp else None
-    if item is None:
-        return None
-    if item.error:
-        logger.warning("download_failed", path=path, error=item.error)
-        return None
-    return item.content
-
-
-def _agent_backend(workspace: Workspace, agent: str) -> MirageBackend:
-    """同一个 Workspace 上的 agent backend 只造一次（工具每次调用都要取文件）。"""
-    key = f"{id(workspace)}:{agent}"
-    backend = _agent_backends.get(key)
-    if backend is None:
-        backend = for_agent(workspace, agent)
-        _agent_backends[key] = backend
-    return backend
+    workspace = build_workspace(owner=owner, thread_id=thread_id, agents=agents)
+    try:
+        resp = await for_agent(workspace, agent).adownload_files([path])
+        item = resp[0] if resp else None
+        if item is None:
+            return None
+        if item.error:
+            logger.warning("download_failed", path=path, error=item.error)
+            return None
+        return item.content
+    finally:
+        await close_workspace(workspace)
 
 
 # ---------- Backend ----------
@@ -298,6 +288,7 @@ class MirageBackend(BackendProtocol):
     """
 
     def __init__(self, workspace: Workspace, *, sandbox_id: str, session_id: str) -> None:
+        self._workspace = workspace
         self._inner = LangchainWorkspace(workspace, sandbox_id=sandbox_id, session_id=session_id)
         self._session_id = session_id
 
@@ -379,6 +370,6 @@ class MirageBackend(BackendProtocol):
         return EditResult(error=_WRITE_DENIED, path=None, occurrences=None)
 
 
-# 进程退出时关池：HTTP 侧（`custom/app.py`）只调 `shared.lifecycle.close_all()`，
+# 进程退出时关共用的 S3 客户端：HTTP 侧（`custom/app.py`）只调 `shared.lifecycle.close_all()`，
 # 不直接 import 这个模块（`custom` 不许 import `graphs`）。
 lifecycle.register(close_all_workspaces)
