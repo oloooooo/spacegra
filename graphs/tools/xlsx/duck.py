@@ -28,7 +28,12 @@ mtime + size」，跨机器不通用；SQLite 依赖文件锁语义，`cache_dir
 
 `header`（表头在第 N 行）是缓存键的一部分：`<sha256>/h<header>/`。不同 header 各存
 一份，常见情况只有 h0 一份。这件事以前由 SQLite 路径的「跳行」逻辑处理，现在
-`pd.read_excel(header=...)` 在解析时一次做掉，四个工具不再分叉。
+由 `read_xlsx(… range='A<表头行>:…')` 在解析时一次做掉，四个工具不再分叉。
+
+解析交给 DuckDB 的 `excel` 扩展（`read_xlsx`）：openpyxl 只读 `<dimension>` 拿表名
+与行列数（不读单元格），用它拼出 `range`。**必须 `header=false`**——`header=true`
+时列宽取自表头行，表头单元格为空的那几列会被整列丢掉（连同下面的数据）。表头
+由我们自己取第一行来定，空串/空格统一成 NULL。
 """
 
 from __future__ import annotations
@@ -40,10 +45,10 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from shared import config
@@ -186,8 +191,8 @@ def sha256_file(path: Path) -> str:
 # ---------- 建派生缓存 ----------
 
 
-def _connect():  # noqa: ANN202 —— duckdb 的类型在可选依赖里
-    """内存库 + 锁配置；`local` 模式再关掉外部访问、只留派生目录。
+def _connect(extra_dirs: Collection[Path] = ()):  # noqa: ANN202 —— duckdb 在可选依赖里
+    """内存库 + 锁配置；`local` 模式再关掉外部访问、只留允许读的目录。
 
     `where` 是模型写的谓词，是最外层的注入面。护栏分两层：`_check_predicate` 先做
     文本检查、再按语法树白名单把关（子查询/表函数/陌生函数一律拒）；连接层在
@@ -201,12 +206,26 @@ def _connect():  # noqa: ANN202 —— duckdb 的类型在可选依赖里
     import duckdb
 
     con = duckdb.connect(":memory:")
+    # `LOAD` 必须在设闸门之前：扩展文件在 ``~/.duckdb/extensions/…``，不在
+    # allowed_directories 里，闸门一开连自动加载都会被拒。
+    try:
+        con.execute("LOAD excel")
+    except Exception as exc:  # noqa: BLE001 - 装没装是部署问题，给出能照做的下一步
+        con.close()
+        raise RuntimeError(
+            "缺少 DuckDB 的 excel 扩展：先执行 `INSTALL excel`（离线部署要预置 "
+            "~/.duckdb/extensions/<duckdb 版本>/<平台>/excel.duckdb_extension）。"
+            f"原始错误：{exc}"
+        ) from exc
     if cache_mode() == "s3":
         _configure_s3(con)
     else:
         # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
-        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。
-        con.execute(f"SET allowed_directories = [{_literal(_derived_dir().as_posix())}]")
+        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。源文件目录也要
+        # 显式加进来：`read_xlsx` 由 DuckDB 自己读文件，不是 Python 读的。
+        dirs = [_derived_dir(), *extra_dirs]
+        allowed = ", ".join(_literal(path.resolve().as_posix()) for path in dirs)
+        con.execute(f"SET allowed_directories = [{allowed}]")
         con.execute("SET enable_external_access = false")
     con.execute("SET lock_configuration = true")
     return con
@@ -231,26 +250,98 @@ def _configure_s3(con: Any) -> None:
     con.execute(f"SET s3_secret_access_key = {_literal(secret_key)}")
 
 
-def _frames(source: Path, header: int) -> dict[str, Any] | None:
-    """整本解析成 DataFrame；规模明显超 `xlsx.max_cells` 时返回 None。
+class _Sheet(NamedTuple):
+    name: str
+    rows: int  # 数据行数（不含表头）
+    columns: int
 
-    先只读工作簿元数据估规模：`pd.read_excel(sheet_name=None)` 会把所有 sheet 全量
-    装进内存，等 `_MAX_CELLS` 判断时进程可能已经被 OOM 杀掉。
+
+_CAST_TYPES = ("BIGINT", "DOUBLE", "TIMESTAMP")  # 没有 DATE：`try_cast` 会把带时间的值截掉
+
+
+def _scan(source: Path, header: int) -> list[_Sheet] | None:
+    """只读 `<dimension>` 拿表名与行列数，不碰单元格；超 `xlsx.max_cells` 返回 None。
+
+    `read_xlsx` 的 `range` 必须写全（`A2:` 会被拒），所以范围只能从尺寸推出来。
+    缺 `<dimension>` 的工作表 openpyxl 会报 `Worksheet is unsized`，这里翻成
+    "请另存为后重传"——猜一个范围只会静默截断。
     """
-    import pandas as pd
     from openpyxl import load_workbook
 
     try:
         book = load_workbook(source, read_only=True, data_only=True)
-    except Exception:  # noqa: BLE001 - 格式问题交给 pandas 报原始错误
-        return pd.read_excel(source, sheet_name=None, header=header, engine="openpyxl")
+    except Exception as exc:  # noqa: BLE001 - 坏文件由调用方回给用户
+        raise ValueError(f"无法读取工作簿：{exc}") from exc
     try:
-        total = sum((ws.max_row or 0) * (ws.max_column or 0) for ws in book.worksheets)
+        sheets: list[_Sheet] = []
+        total = 0
+        for ws in book.worksheets:
+            try:
+                ws.calculate_dimension()  # 缺 dimension 时只有它会明确报错
+            except ValueError as exc:
+                raise ValueError(f"工作表「{ws.title}」缺少尺寸信息，请用 Excel 另存为后重传") from exc
+            rows, columns = int(ws.max_row or 0), int(ws.max_column or 0)
+            data_rows = max(rows - int(header) - 1, 0)
+            if not data_rows or not columns:
+                continue
+            total += data_rows * columns
+            if total > _MAX_CELLS:
+                return None
+            sheets.append(_Sheet(str(ws.title), data_rows, columns))
+        return sheets
     finally:
         book.close()
-    if total > _MAX_CELLS:
-        return None
-    return pd.read_excel(source, sheet_name=None, header=header, engine="openpyxl")
+
+
+def _staging(con: Any, source: Path, sheet: _Sheet, header: int) -> tuple[list[str], list[str]]:
+    """把一张表按 `range` 读进临时表 `staging`（带行号，全 VARCHAR）。
+
+    返回 `(staging 里的原始列名, 表头列名)`：前者用于读数据，后者是给用户看的。
+    """
+    from openpyxl.utils import get_column_letter
+
+    first = int(header) + 1
+    span = f"A{first}:{get_column_letter(sheet.columns)}{first + sheet.rows}"
+    con.execute("DROP TABLE IF EXISTS staging")
+    con.execute(
+        f"CREATE TEMP TABLE staging AS SELECT row_number() OVER () AS _rn, * FROM read_xlsx("
+        f"{_literal(source.as_posix())}, sheet={_literal(sheet.name)}, "
+        f"header=false, all_varchar=true, range={_literal(span)})"
+    )
+    columns = [row[0] for row in con.execute("DESCRIBE staging").fetchall() if row[0] != "_rn"]
+    head = con.execute("SELECT * EXCLUDE (_rn) FROM staging WHERE _rn = 1").fetchone() or ()
+    return columns, _clean_columns(list(head[: len(columns)]))
+
+
+def _castable(con: Any, names: list[str], cast_type: str) -> set[str]:
+    """哪些列的非空值全都能转成 `cast_type`（空值不参与判断）。"""
+    if not names:
+        return set()
+    checks = []
+    for index, name in enumerate(names):
+        quoted = _ident(name)
+        filled = f"nullif(trim({quoted}), '')"
+        ok = f"try_cast({filled} AS {cast_type}) IS NOT NULL"
+        if cast_type == "BIGINT":
+            # `try_cast('300.5' AS BIGINT)` 会四舍五入成 301，不报错——所以整数要多一道形状检查。
+            ok += f" AND regexp_full_match(trim({quoted}), '^[-+]?[0-9]+$')"
+        checks.append(
+            f"count(*) FILTER (WHERE {ok}) = count(*) FILTER (WHERE {filled} IS NOT NULL) "
+            f"AND count(*) FILTER (WHERE {filled} IS NOT NULL) > 0 AS c{index}"
+        )
+    row = con.execute(f"SELECT {', '.join(checks)} FROM cleaned").fetchone() or ()
+    return {name for name, ok in zip(names, row, strict=False) if ok}
+
+
+def _projection(names: list[str], types: dict[str, str]) -> str:
+    """按证据出的类型拼 SELECT 列表；没有证据的列保持文本。"""
+    parts = []
+    for name in names:
+        value = _ident(name)
+        cast_type = types.get(name)
+        expression = f"CAST({value} AS {cast_type})" if cast_type else value
+        parts.append(f"{expression} AS {value}")
+    return ", ".join(parts)
 
 
 async def ensure(source: Path, header: int = 0) -> str | None:
@@ -273,7 +364,7 @@ def _clean_columns(columns: Any) -> list[str]:
     out: list[str] = []
     seen: dict[str, int] = {}
     for raw in columns:
-        name = str(raw).strip() or "列"
+        name = ("" if raw is None else str(raw)).strip() or "列"
         count = seen.get(name, 0) + 1
         seen[name] = count
         out.append(name if count == 1 else f"{name}_{count}")
@@ -286,39 +377,54 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
     返回清单；数据规模超过 `xlsx.max_cells` 时返回 None——那种表任何查询都会打满
     CPU，调用方应当直接回一句"表太大"，而不是先落一份几 GB 的中间产物。
     """
-    frames = _frames(source, header)
-    if frames is None:
+    metas = _scan(source, header)
+    if metas is None:
         return None
-    con = _connect()
+    con = _connect([source.parent])
     try:
         sheets: list[dict[str, Any]] = []
-        cells = 0
-        for name, frame in frames.items():
-            frame = frame.dropna(axis=0, how="all").dropna(axis=1, how="all")
-            if frame.empty:
+        for meta in metas:
+            columns, names = _staging(con, source, meta, header)
+            con.execute(
+                "CREATE TEMP TABLE cleaned AS SELECT "
+                + ", ".join(
+                    f"CASE WHEN trim({_ident(c)}) = '' THEN NULL ELSE {_ident(c)} END AS {_ident(n)}"
+                    for c, n in zip(columns, names, strict=True)
+                )
+                + " FROM staging WHERE _rn > 1"
+            )
+            con.execute("DROP TABLE staging")
+            blank = " AND ".join(f"{_ident(name)} IS NULL" for name in names)
+            con.execute(f"DELETE FROM cleaned WHERE {blank}")
+            types: dict[str, str] = {}
+            pending = list(names)
+            for cast_type in _CAST_TYPES:
+                ok = _castable(con, pending, cast_type)
+                types.update(dict.fromkeys(ok, cast_type))
+                pending = [name for name in pending if name not in ok]
+            rows = int(con.execute("SELECT count(*) FROM cleaned").fetchone()[0])
+            if not rows:
+                con.execute("DROP TABLE cleaned")
                 continue
-            cells += int(frame.shape[0]) * int(frame.shape[1])
-            if cells > _MAX_CELLS:
-                return None
-            frame = frame.copy()
-            frame.columns = _clean_columns(frame.columns)  # type: ignore[assignment]
-            target = store_path(sha256, name, header)
-            con.register("staging", frame)
+            target = store_path(sha256, meta.name, header)
+            tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             try:
-                tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
                 tmp.parent.mkdir(parents=True, exist_ok=True)
                 tmp.unlink(missing_ok=True)
-                con.execute(f"COPY staging TO {_literal(tmp.as_posix())} (FORMAT PARQUET, COMPRESSION ZSTD)")
+                con.execute(
+                    f"COPY (SELECT {_projection(names, types)} FROM cleaned) TO "
+                    f"{_literal(tmp.as_posix())} (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
                 data = tmp.read_bytes()
             finally:
-                con.unregister("staging")
+                con.execute("DROP TABLE IF EXISTS cleaned")
                 tmp.unlink(missing_ok=True)
             store.write_atomic(target, data)
             sheets.append(
                 {
-                    "name": str(name),
-                    "rows": int(frame.shape[0]),
-                    "columns": [str(c) for c in frame.columns],
+                    "name": meta.name,
+                    "rows": rows,
+                    "columns": names,
                     "bytes": len(data),
                 }
             )

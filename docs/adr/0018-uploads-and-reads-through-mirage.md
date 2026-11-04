@@ -103,7 +103,9 @@ xlsx 是 zip 里的 XML，每查一次都要重新解压解析：80k×10×3 的�
 「路径 + mtime + size」，跨机器不通用；**SQLite 依赖文件锁语义**，`cache_dir` 一旦
 指向共享卷（或想让多实例共用）就不再成立；只剩一种执行器，跨表 join 要手工搬数据。
 
-所以**删掉 SQLite 这条路**，任何表第一次被查时都解析一次：
+所以**删掉 SQLite 这条路**，任何表第一次被查时都解析一次（解析器是 DuckDB 的 `excel`
+扩展：openpyxl 只读 `<dimension>` 拿 sheet 名与行列数，`read_xlsx(range=…)` 直接流式
+读出，不再经过 pandas 的整本物化）：
 
 ```
 xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parquet

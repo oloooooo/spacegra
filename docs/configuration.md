@@ -355,6 +355,13 @@ checkpoint），而启动日志里**没有任何告警**。
 | `xlsx.cache_prefix` | `xlsx-derived` | `XLSX_CACHE_PREFIX` | `cache_mode=s3` 时的对象前缀；派生对象按内容哈希命名，可随时清 |
 | `xlsx.cache_local_max_mb` | `2048` | `XLSX_CACHE_LOCAL_MAX_MB` | 本机派生缓存预算，超了按最久未改动淘汰 |
 
+解析 xlsx 用的是 DuckDB 的 `excel` 扩展（`read_xlsx`）。首次启动会自动 `LOAD`，
+DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网部署要预置**：
+先在一台能上网的机器上执行 `python -c "import duckdb; duckdb.connect().execute('INSTALL excel')"`，
+把 `~/.duckdb/extensions/<duckdb 版本>/<平台>/excel.duckdb_extension` 拷到目标机同一路径，
+或用 `SET extension_directory` 指到共享目录。缺扩展时第一条表格工具调用会返回明确的
+`缺少 DuckDB 的 excel 扩展` 错误，不会静默降级。
+
 #### 上传介质（`shared/session/uploads.py`）
 
 上传字节存在哪，与 `okf.backend`（知识空间怎么读）正交，见 ADR-0018 §9。
