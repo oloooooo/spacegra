@@ -59,7 +59,7 @@ dependencies = [
     "deepagents[quickjs]>=0.7.23",
     "langchain-openai>=1.7.0",
     "pandas>=3.0.6",
-    # pandas 读 xlsx 的引擎，pd.read_excel 没它直接 ImportError
+    # 只读 `<dimension>` 拿表名与行列数（解析交给 DuckDB excel 扩展）；演示数据脚本也用
     "openpyxl>=3.1.5",
     "bcrypt>=5.0.0",
     "boto3>=1.40.46,<1.40.62",

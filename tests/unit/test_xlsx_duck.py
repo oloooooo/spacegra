@@ -233,3 +233,72 @@ def test_local_parquet_returns_existing_file(tmp_path: Path, monkeypatch) -> Non
     path.write_bytes(b"PAR1")
 
     assert duck.local_parquet(SHA, "Sheet1") == path
+
+
+def test_scan_refuses_oversized_workbook_before_parsing(tmp_path: Path, monkeypatch) -> None:
+    """先看规模再解析：只读 `<dimension>`，超 `xlsx.max_cells` 直接拒（#11）。"""
+    import pandas as pd
+
+    source = tmp_path / "big.xlsx"
+    pd.DataFrame({"a": [1, 2], "b": [3, 4]}).to_excel(source, index=False)
+    monkeypatch.setattr(duck, "_MAX_CELLS", 1)
+
+    assert duck._scan(source, 0) is None
+
+
+def test_scan_reports_sheet_shapes(tmp_path: Path) -> None:
+    """表头行不算数据行；没有数据行的 sheet 不出现。"""
+    import pandas as pd
+
+    source = tmp_path / "small.xlsx"
+    with pd.ExcelWriter(source) as writer:
+        pd.DataFrame({"a": [1, 2, 3]}).to_excel(writer, sheet_name="数据", index=False)
+        pd.DataFrame().to_excel(writer, sheet_name="空表", index=False)
+
+    assert duck._scan(source, 0) == [duck._Sheet(name="数据", rows=3, columns=1)]
+
+
+def test_build_derived_keeps_columns_with_empty_header(tmp_path: Path, monkeypatch) -> None:
+    """表头单元格为空不能把整列丢掉（`header=true` 会丢），行数也不含表头。"""
+    import duckdb
+    from openpyxl import Workbook
+
+    try:
+        duckdb.connect().execute("LOAD excel")
+    except Exception:  # noqa: BLE001 - 没装 excel 扩展的环境跳过
+        pytest.skip("duckdb excel 扩展未安装")
+    source = tmp_path / "src.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "数据"
+    sheet.append(["客户", "金额", None])
+    sheet.append(["甲", 100, "备注值"])
+    book.save(source)
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+
+    manifest = duck.build_derived("deadbeef", source, 0)
+
+    assert manifest is not None
+    assert manifest["sheets"] == [
+        {
+            "name": "数据",
+            "rows": 1,
+            "columns": ["客户", "金额", "列"],
+            "bytes": manifest["sheets"][0]["bytes"],
+        }
+    ]
+
+
+def test_size_limit_drops_whole_cache_group(tmp_path: Path, monkeypatch) -> None:
+    """清单和 parquet 必须一起删：只删 parquet 会留下"清单在、数据没了"的目录（#10）。"""
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_local_max_mb": 1}))
+    group = tmp_path / "derived" / SHA / "h0"
+    group.mkdir(parents=True)
+    (group / "manifest.json").write_bytes(b"{}")
+    (group / "Sheet1.parquet").write_bytes(b"x" * (700 * 1024))
+    (group / "Sheet2.parquet").write_bytes(b"x" * (700 * 1024))
+
+    duck._enforce_size_limit()
+
+    assert not group.exists()
