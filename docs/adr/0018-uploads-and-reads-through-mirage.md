@@ -181,10 +181,23 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 
 - **`grep` 慢**：L 档全库 grep 1839ms（S3）vs 宿主 ripgrep 351ms；S 档快（8.6ms vs 22.3ms）。
   真要做大范围检索，应绕开 Mirage 用宿主 ripgrep，再把命中文件交给 Mirage 读。
-- **每 run 冷启动 200–400ms**：能接受是因为池会复用；单次会话首次提问会感觉到。
+- **每 run 新建 Workspace**：S3 客户端进程级共用后，非首个 run 约 **12ms**（构造 ~1ms，贵的是
+  每个新 `S3VFS` 的第一次操作）；进程内第一个 run 仍要付 ~200ms（botocore 冷启 + 首次 LIST）。
+  池已删除，代价是每个 run 重建一次索引缓存（Redis 里的旧条目按 TTL 过期，不阻塞）。
+- **每 run 一次同步 Redis 往返**：`mirage.redis_url` 非空时，`build_workspace` 建 3 个 Redis store
+  （两个 mount 的索引 + 一个 workspace 文件缓存）。实测中位 **5.4ms**（20 次，min 4.4 / max 29.8）：
+  3 个 `Redis.from_url` client 是惰性的（不建连）；真正的一次 I/O 是文件缓存构造时
+  `mirage/vfs/redis/store.py:62-64` 的同步 `sadd(<root>, "/")`——**0.42ms（中位）/ 0.57ms（p95）**，
+  每 run 一条新 TCP（实测 20 次 build 恰好新增 20 条）。**为什么不修**：`RedisIndexConfig` /
+  `RedisCacheConfig` 只有 `url` + `key_prefix`，`build_index` / `build_file_cache` 都不透传 client，
+  `Workspace(cache=…)` 收的也是配置而非实例；只能改 mirage 或猴补 `RedisStore.__init__`（版本升级
+  会静默失效）。0.4ms/run 换不来这个风险。**重看条件**：Redis 变成远程（RTT 1–3ms），或出现
+  高并发批量建 Workspace 的场景。
 - **没有 `execute`**：这是刻意的（见决定 2）。要跑代码只能靠 `CodeInterpreterMiddleware`
   的量化解释器，不能拿到 shell。
-- **两个 S3 client**：`/` 和 `/uploads` 各一个 `S3VFS`（两套连接池），每 run 两个。
+- **两个 `S3VFS`、一份 S3 客户端**：`/` 与 `/uploads` 各一个 VFS，但共用进程级的 aioboto3 client
+  （连接池一份，默认上限 10 条）；两个 VFS 的 `close()` 都不会关掉这份 client，由
+  `shared/lifecycle.py` 在进程退出时统一关。
 - **只有异步方法**：Mirage 适配层不实现同步 `ls/read/...`，deepagents 侧一律走 `a*`。
 - **本地盘模式读路径没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / [ADR-0017](./archive/0017-local-backend-scandir.md)），
   上传目录由 `LocalBackend` 挂在 `/uploads/`（ADR-0018 §9），不上 Mirage。
@@ -210,22 +223,5 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    不适合做 HTTP 入口。写用 boto3，读用 Mirage，边界清楚。
 3. **Deep Agents 的 `StoreBackend`**：文件进 PG 的 Store，大对象不合适（ADR-0016 的问题）。
 4. **每 run 新建 Workspace**：语义最干净，但冷启动每轮都付，且拿不到 run 收尾钩子时
-   泄漏的连接比池化更难排查。
-
-### 每 run 的 Redis 开销（2026-11 实测：本机 Redis + SeaweedFS）
-
-`mirage.redis_url` 非空时，`build_workspace` 每次建 3 个 Redis store（两个 mount 各一个索引 +
-一个 workspace 级文件缓存）。实测 `build_workspace` 中位 **5.4ms**（20 次，min 4.4 / max 29.8），
-拆开看：
-
-- 3 个 `Redis.from_url` client 是**惰性**的，构造时不建连接、不发命令；
-- 只有文件缓存会做**一次同步往返**：`mirage/vfs/redis/store.py:62-64` 在 `__init__` 里
-  `sync_redis.Redis.from_url(url)` → `sadd(<root>, "/")` → `close()`。本机 **0.42ms（中位）/
-  0.57ms（p95）**，每 run 一条新 TCP（实测 20 次 build 恰好新增 20 条连接）。
-
-**为什么不改**：`RedisIndexConfig` / `RedisCacheConfig` 只有 `url` + `key_prefix`；
-`RedisIndexCacheStore(client=…)` 支持注入 client，但 `build_index` / `build_file_cache`
-都不透传，`Workspace(cache=…)` 收的也是配置而非实例。要在我们这侧共享 client，只能改
-mirage，或在 import 时猴补 `RedisStore.__init__` —— 后者会让版本升级静默失效。0.4ms/run
-换不来这个风险。**触发重看的条件**：Redis 变成远程（RTT 1–3ms）或出现高并发批量建
-Workspace 的场景。
+   泄漏的连接比池化更难排查。现在的折中是：删池 + 共用 S3 客户端 + `run_scope` 在 run
+   结束时关 Workspace（代价与残留见上一节的“每 run 一次同步 Redis 往返”）。
