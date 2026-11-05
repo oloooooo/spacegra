@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
-from aegra_api.core.orm import get_session_maker
 from custom.api.account import router as account_router
 from custom.api.delivery import router as delivery_router
 from custom.api.graphs import router as graphs_router
@@ -12,19 +11,9 @@ from custom.api.tasks import router as tasks_router
 from custom.api.uploads import router as uploads_router
 from custom.middleware.body_limit import UploadBodyLimit
 from custom.service.outbox_dispatcher import dispatcher as outbox_dispatcher
-from custom.service.run_repair import repair_stale_runs
 from shared import lifecycle
 
 logger = structlog.getLogger(__name__)
-
-
-async def _repair_runs() -> None:
-    """启动自检：把上次进程留下的 running/busy 改回去（`custom/service/run_repair.py`）。"""
-    try:
-        async with get_session_maker()() as session:
-            await repair_stale_runs(session)
-    except Exception as exc:  # noqa: BLE001 - 库还没起来也不能拦住启动
-        logger.warning("runs.repair_failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -32,8 +21,8 @@ async def lifespan(app: FastAPI):
     """发件箱分发者（ADR-0010）。
 
     分发者每个进程跑一个，多进程靠 SKIP LOCKED + 租约分工。
+    残留 run 的清扫在 aegra 启动时做（本地模式，`close_unleased_runs`），这里不再重复。
     """
-    await _repair_runs()
     await outbox_dispatcher.start()
     try:
         yield

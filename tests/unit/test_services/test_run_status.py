@@ -6,6 +6,7 @@ import pytest
 
 from aegra_api.services.run_status import (
     _safe_serialize,
+    close_unleased_runs,
     finalize_run,
     interrupt_unowned_run,
     set_thread_status,
@@ -274,6 +275,40 @@ class TestInterruptUnownedRun:
         assert interrupted is False
         mock_set_thread.assert_not_awaited()
         session.commit.assert_not_awaited()
+
+
+class TestCloseUnleasedRuns:
+    @pytest.mark.asyncio
+    async def test_closes_runs_and_returns_count(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.fetchall.return_value = [
+            ("run-1", "thread-1", "user-1"),
+            ("run-2", "thread-1", "user-1"),
+        ]
+        session.execute = AsyncMock(return_value=result)
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            closed = await close_unleased_runs()
+
+        assert closed == 2
+        run_update = str(session.execute.await_args_list[0].args[0].compile())
+        assert "lease_expires_at IS NULL" in run_update or "lease_expires_at IS NOT NULL" in run_update
+        assert "status" in run_update
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_rows_still_commits(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=result)
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            closed = await close_unleased_runs()
+
+        assert closed == 0
+        session.commit.assert_awaited_once()
 
 
 class TestSafeSerialize:

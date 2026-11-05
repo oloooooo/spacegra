@@ -60,6 +60,48 @@ async def start_run(run_id: str, *, user_id: str) -> bool:
         return started
 
 
+async def close_unleased_runs() -> int:
+    """Mark running runs that hold no live lease as error. Startup, local mode only.
+
+    A fresh process owns no in-flight run, so any `running` row without a live lease
+    belongs to a process that is gone. Worker-mode rows always carry a lease (claimed
+    in one UPDATE, see worker_executor), so this cannot touch a run another process
+    still owns. Idempotent: a second caller matches nothing.
+
+    Returns how many runs were closed.
+    """
+    now = datetime.now(UTC)
+    async with _get_session_maker()() as session:
+        rows = (
+            await session.execute(
+                update(RunORM)
+                .where(
+                    RunORM.status == "running",
+                    or_(RunORM.lease_expires_at.is_(None), RunORM.lease_expires_at < now),
+                )
+                .values(
+                    status="error",
+                    error_message="Run ended with its process (startup sweep)",
+                    claimed_by=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+                .returning(RunORM.run_id, RunORM.thread_id, RunORM.user_id)
+            )
+        ).fetchall()
+
+        by_user: dict[str, set[str]] = {}
+        for _, thread_id, user_id in rows:
+            by_user.setdefault(user_id, set()).add(thread_id)
+        for user_id, thread_ids in by_user.items():
+            await set_thread_status_if_no_active_runs(session, thread_ids, "idle", user_id=user_id)
+        await session.commit()
+
+    if rows:
+        logger.warning("Closed running runs without a live lease", count=len(rows))
+    return len(rows)
+
+
 async def set_thread_status(session: AsyncSession, thread_id: str, status: str) -> None:
     """Update a thread's status column.
 

@@ -29,7 +29,7 @@ logger = structlog.getLogger(__name__)
 router = APIRouter(prefix="/custom", tags=["/custom"])
 
 # 跑着的 run 会拒上传：一次回答里前后读到两份不同的字节就是错的。
-# 残留的 `running` 不在这里放行，由启动自检（`custom/service/run_repair.py`）修掉。
+# 残留的 `running` 不在这里放行，由 aegra 启动时的 `close_unleased_runs()` 修掉（仅本地模式）。
 _ACTIVE_RUN = ("pending", "running")
 
 

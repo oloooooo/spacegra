@@ -42,6 +42,7 @@ from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
 from aegra_api.services.run_preparation import get_default_durability
+from aegra_api.services.run_status import close_unleased_runs
 from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
 from aegra_api.settings import settings
 from aegra_api.utils.setup_logging import setup_logging
@@ -145,6 +146,10 @@ async def lifespan(_app: FastAPI)-> AsyncGenerator[None]:
             "or horizontal scaling. Set REDIS_BROKER_ENABLED=true and configure "
             "REDIS_URL for production use.",
         )
+        # Local mode writes no leases and the lease reaper never starts, so nothing
+        # else would ever close a run whose process died. A fresh process owns no
+        # in-flight run, so the sweep cannot hit live work.
+        await close_unleased_runs()
 
     # Start broker manager (cleanup task for in-memory, cancel listener for Redis)
     await broker_manager.start()
