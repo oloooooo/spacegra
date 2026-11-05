@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 from typing import Any, BinaryIO
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,6 +84,12 @@ async def count_files(session: AsyncSession, owner: str, thread_id: str) -> int:
     )
 
 
+def _lock_key(owner: str, thread_id: str, name: str) -> int:
+    """同名上传的咨询锁键：blake2b 取 8 字节（PG 的 `bigint`，带符号）。"""
+    raw = f"{owner}\x00{thread_id}\x00{name}".encode()
+    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big", signed=True)
+
+
 async def save_upload(
     session: AsyncSession,
     *,
@@ -100,7 +107,11 @@ async def save_upload(
     name = safe_name(name)
     limit = size_limit(name)
 
-    # 配额：先数后插不是原子的，并发上传同名/多文件时可能超出 1~2 个。
+    # 同名并发上传必须串行：备份→覆盖→落库三步之间没有隔离，两个请求会互相冲掉备份，
+    # 最后一个赢、另一个的字节凭空消失（#16）。事务级咨询锁在 commit/rollback 时自动释放。
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _lock_key(owner, thread_id, name)})
+
+    # 配额：先数后插不是原子的，不同名的并发请求仍可能超出 1~2 个。
     # 这是软限制（真正挡人的是单文件大小），不值得为此加行锁。
     max_files = int(config.get("session_files.max_files_per_session"))
     existing = await session.scalar(

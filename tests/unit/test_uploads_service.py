@@ -67,7 +67,7 @@ class _FakeSession:
     async def scalar(self, stmt):  # noqa: ANN001, ANN201 - 模拟"同名文件已存在"
         return "old-sha"
 
-    async def execute(self, stmt):  # noqa: ANN001
+    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         if self.fail_execute:
             raise RuntimeError("db down")
 
@@ -79,14 +79,19 @@ class _FakeSession:
 
 
 class _QueuedSession(_FakeSession):
-    """按顺序返回 `scalar()` 的值：先查同名 sha，再查配额数量。"""
+    """按顺序返回 `scalar()` 的值：先查同名 sha，再查配额数量；同时记录执行过的 SQL。"""
 
     def __init__(self, *values: object) -> None:
         super().__init__()
         self.values = list(values)
+        self.sql: list[str] = []
 
     async def scalar(self, stmt):  # noqa: ANN001, ANN201
         return self.values.pop(0)
+
+    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.sql.append(str(stmt))
+        return await super().execute(stmt)
 
 
 @pytest.fixture
@@ -160,6 +165,27 @@ class TestSaveUploadGuards:
             )
 
         assert e.value.status_code == 503
+
+
+class TestSameNameSerialization:
+    """同名并发上传要先拿咨询锁，否则备份/覆盖会互相冲掉（issue #16）。"""
+
+    def test_lock_key_is_stable_and_distinct(self) -> None:
+        a = uploads_service._lock_key("u1", "t1", "a.md")
+        assert a == uploads_service._lock_key("u1", "t1", "a.md")
+        assert a != uploads_service._lock_key("u1", "t1", "b.md")
+        assert a != uploads_service._lock_key("u1", "t2", "a.md")
+        assert -(2**63) <= a < 2**63
+
+    async def test_lock_is_taken_before_any_write(self, fs_store) -> None:
+        session = _QueuedSession("old-sha")
+
+        await uploads_service.save_upload(
+            session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"x"), spaces=[]
+        )
+
+        assert "pg_advisory_xact_lock" in session.sql[0]
+        assert len(session.sql) == 2, "锁之后只应再有一条 upsert"
 
 
 class TestOverwriteRollback:
