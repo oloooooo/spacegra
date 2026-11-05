@@ -9,7 +9,6 @@ md 等其他文件 → 主 agent 自己读。
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import structlog
@@ -30,10 +29,8 @@ logger = structlog.getLogger(__name__)
 router = APIRouter(prefix="/custom", tags=["/custom"])
 
 # 跑着的 run 会拒上传：一次回答里前后读到两份不同的字节就是错的。
-# `updated_at` 只在状态变化时写，所以崩溃残留的 running 会在两小时后自行失效；
-# 宁可漏拦（跑太久）也不要误拦（库里有陈旧状态就会永远传不上去）。
+# 残留的 `running` 不在这里放行，由启动自检（`custom/service/run_repair.py`）修掉。
 _ACTIVE_RUN = ("pending", "running")
-_ACTIVE_WINDOW = timedelta(hours=2)
 
 
 async def _authorize_thread(session: AsyncSession, thread_id: str, user: User) -> None:
@@ -44,13 +41,7 @@ async def _authorize_thread(session: AsyncSession, thread_id: str, user: User) -
     if owner != user.identity:
         raise HTTPException(status_code=403, detail="无权向该会话上传文件")
     active = await session.scalar(
-        select(RunORM.run_id)
-        .where(
-            RunORM.thread_id == thread_id,
-            RunORM.status.in_(_ACTIVE_RUN),
-            RunORM.updated_at > datetime.now(UTC) - _ACTIVE_WINDOW,
-        )
-        .limit(1)
+        select(RunORM.run_id).where(RunORM.thread_id == thread_id, RunORM.status.in_(_ACTIVE_RUN)).limit(1)
     )
     if active is not None:
         raise HTTPException(status_code=409, detail="会话正在运行，等这一轮结束后再上传")
