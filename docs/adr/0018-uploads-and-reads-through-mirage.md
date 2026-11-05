@@ -211,3 +211,21 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 3. **Deep Agents 的 `StoreBackend`**：文件进 PG 的 Store，大对象不合适（ADR-0016 的问题）。
 4. **每 run 新建 Workspace**：语义最干净，但冷启动每轮都付，且拿不到 run 收尾钩子时
    泄漏的连接比池化更难排查。
+
+### 每 run 的 Redis 开销（2026-11 实测：本机 Redis + SeaweedFS）
+
+`mirage.redis_url` 非空时，`build_workspace` 每次建 3 个 Redis store（两个 mount 各一个索引 +
+一个 workspace 级文件缓存）。实测 `build_workspace` 中位 **5.4ms**（20 次，min 4.4 / max 29.8），
+拆开看：
+
+- 3 个 `Redis.from_url` client 是**惰性**的，构造时不建连接、不发命令；
+- 只有文件缓存会做**一次同步往返**：`mirage/vfs/redis/store.py:62-64` 在 `__init__` 里
+  `sync_redis.Redis.from_url(url)` → `sadd(<root>, "/")` → `close()`。本机 **0.42ms（中位）/
+  0.57ms（p95）**，每 run 一条新 TCP（实测 20 次 build 恰好新增 20 条连接）。
+
+**为什么不改**：`RedisIndexConfig` / `RedisCacheConfig` 只有 `url` + `key_prefix`；
+`RedisIndexCacheStore(client=…)` 支持注入 client，但 `build_index` / `build_file_cache`
+都不透传，`Workspace(cache=…)` 收的也是配置而非实例。要在我们这侧共享 client，只能改
+mirage，或在 import 时猴补 `RedisStore.__init__` —— 后者会让版本升级静默失效。0.4ms/run
+换不来这个风险。**触发重看的条件**：Redis 变成远程（RTT 1–3ms）或出现高并发批量建
+Workspace 的场景。
