@@ -1,8 +1,7 @@
-"""上传服务里不碰 IO 的那部分：文件名校验与单文件大小上限（ADR-0018）。
+"""上传服务的校验与写路径保护（ADR-0018）。
 
-真正的写路径（`save_upload`）要对象存储 + PG，留到 e2e；这里只钉住两条安全底线：
-路径分隔符必须被拒（否则 key 会逃出 `uploads/<owner>/<thread>/`），以及表格与普通文件
-用的是**不同的**配置项（表格大表上限单独可调）。
+前两节是不碰 IO 的纯函数；`TestOverwriteRollback` / `TestSaveUploadGuards` 用 fs 介质 + 假
+session 钉住失败路径：台账写不进去要换回旧字节，配额/超限/存储不可用要映射成 4xx/5xx。
 """
 
 from __future__ import annotations
@@ -79,6 +78,17 @@ class _FakeSession:
         return None
 
 
+class _QueuedSession(_FakeSession):
+    """按顺序返回 `scalar()` 的值：先查同名 sha，再查配额数量。"""
+
+    def __init__(self, *values: object) -> None:
+        super().__init__()
+        self.values = list(values)
+
+    async def scalar(self, stmt):  # noqa: ANN001, ANN201
+        return self.values.pop(0)
+
+
 @pytest.fixture
 def fs_store(tmp_path, monkeypatch: pytest.MonkeyPatch):
     values = {
@@ -95,6 +105,61 @@ def fs_store(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("custom.service.uploads.config.get", fake_get)
     monkeypatch.setattr("shared.session.uploads.config.get", fake_get)
     return tmp_path / "uploads"
+
+
+class TestSaveUploadGuards:
+    """配额、超限、存储不可用的分支（issue #15）。"""
+
+    async def test_quota_blocks_new_file(self, fs_store) -> None:
+        session = _QueuedSession(None, 50)
+
+        with pytest.raises(uploads_service.UploadError) as e:
+            await uploads_service.save_upload(
+                session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"x"), spaces=[]
+            )
+
+        assert e.value.status_code == 409
+        assert not uploads_service.upload_store.local_path("u1", "t1", "a.md").exists()
+
+    async def test_quota_skipped_for_overwrite(self, fs_store) -> None:
+        """已存在的同名文件不算新增，配额满了也能覆盖。"""
+        uploads = __import__("shared.session.uploads", fromlist=["uploads"])
+        uploads.put_stream(__import__("io").BytesIO(b"old"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)
+        session = _QueuedSession("old-sha")
+
+        await uploads_service.save_upload(
+            session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"new"), spaces=[]
+        )
+
+        assert uploads.read_bytes("u1", "t1", "a.md") == b"new"
+
+    async def test_too_large_maps_to_413(self, fs_store, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*args: object, **kwargs: object) -> None:
+            raise uploads_service.upload_store.UploadTooLarge("文件超过 1MB 上限")
+
+        monkeypatch.setattr(uploads_service.upload_store, "put_stream", boom)
+        session = _QueuedSession("old-sha")
+
+        with pytest.raises(uploads_service.UploadError) as e:
+            await uploads_service.save_upload(
+                session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"x"), spaces=[]
+            )
+
+        assert e.value.status_code == 413
+
+    async def test_store_down_maps_to_503(self, fs_store, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*args: object, **kwargs: object) -> None:
+            raise uploads_service.upload_store.UploadUnavailable("s3 down")
+
+        monkeypatch.setattr(uploads_service.upload_store, "put_stream", boom)
+        session = _QueuedSession("old-sha")
+
+        with pytest.raises(uploads_service.UploadError) as e:
+            await uploads_service.save_upload(
+                session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"x"), spaces=[]
+            )
+
+        assert e.value.status_code == 503
 
 
 class TestOverwriteRollback:

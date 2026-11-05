@@ -80,6 +80,50 @@ class TestFsPut:
         assert uploads.read_bytes("u1", "t2", "same.md") == b"b"
 
 
+class TestS3Put:
+    """s3 分支：字节只进对象存储，本地陈旧副本被清掉（issue #15）。"""
+
+    def _s3(self, monkeypatch: pytest.MonkeyPatch, local_dir: Path) -> None:
+        monkeypatch.setattr(app_config, "get", lambda key: {"uploads.dir": str(local_dir), "uploads.store": "s3"}[key])
+
+    def test_s3_round_trip_drops_stale_local_copy(self, local_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._s3(monkeypatch, local_dir)
+        stale = uploads.local_path("u1", "t1", "a.xlsx")
+        uploads.ensure_dir(stale.parent).joinpath(stale.name).write_bytes(b"stale")
+        seen: list[str] = []
+
+        def fake_put_stream(src, key, *, max_bytes):  # noqa: ANN001, ANN202
+            seen.append(key)
+            return "sha-of-bytes", 5
+
+        monkeypatch.setattr(uploads.blobs, "put_stream", fake_put_stream)
+
+        key, sha, size = uploads.put_stream(
+            io.BytesIO(b"hello"), owner="u1", thread_id="t1", name="a.xlsx", max_bytes=64
+        )
+
+        assert (key, sha, size) == ("uploads/u1/t1/a.xlsx", "sha-of-bytes", 5)
+        assert seen == ["uploads/u1/t1/a.xlsx"]
+        assert not stale.exists(), "覆盖后本地旧副本必须删掉，否则读到旧字节"
+
+    def test_s3_maps_blob_errors(self, local_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._s3(monkeypatch, local_dir)
+
+        def too_large(src, key, *, max_bytes):  # noqa: ANN001, ANN202
+            raise uploads.blobs.BlobTooLarge("too big")
+
+        monkeypatch.setattr(uploads.blobs, "put_stream", too_large)
+        with pytest.raises(uploads.UploadTooLarge):
+            uploads.put_stream(io.BytesIO(b"x"), owner="u1", thread_id="t1", name="a.md", max_bytes=1)
+
+        def unavailable(src, key, *, max_bytes):  # noqa: ANN001, ANN202
+            raise uploads.blobs.BlobUnavailable("down")
+
+        monkeypatch.setattr(uploads.blobs, "put_stream", unavailable)
+        with pytest.raises(uploads.UploadUnavailable):
+            uploads.put_stream(io.BytesIO(b"x"), owner="u1", thread_id="t1", name="a.md", max_bytes=1)
+
+
 class TestMaterialize:
     def test_fs_mode_returns_existing_file(self, local_dir: Path) -> None:
         uploads.put_stream(io.BytesIO(b"x"), owner="u1", thread_id="t1", name="a.md", max_bytes=64)

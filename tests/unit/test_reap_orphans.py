@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -29,6 +32,39 @@ def test_live_prefixes_have_both_shapes() -> None:
 
     assert local == {"u1/t1/", "张三-9d6966/t2/"}
     assert s3 == {"uploads/u1/t1/", "uploads/张三-9d6966/t2/"}
+
+
+def test_local_orphans_match_exactly_not_by_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`u1/t1/` 不能保护 `u1/t10/`：live 是集合精确匹，不是 startswith。"""
+    reaper = _reaper()
+    cutoff = datetime.now(UTC) - timedelta(days=1)
+    old = cutoff - timedelta(days=1)
+    fake = {
+        "u1/t1/": [{"LastModified": old, "Size": 1}],
+        "u1/t10/": [{"LastModified": old, "Size": 2}],
+    }
+    monkeypatch.setattr(reaper, "_iter_local_prefixes", lambda: fake)
+
+    prefixes, objects, size = reaper._local_orphans({"u1/t1/"}, cutoff)
+
+    assert prefixes == ["u1/t10/"]
+    assert (objects, size) == (1, 2)
+
+
+def test_local_orphans_keep_recent_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """还有新文件的目录不动：可能有上传正在写。"""
+    reaper = _reaper()
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    fake = {
+        "u1/t1/": [{"LastModified": datetime.now(UTC), "Size": 1}],
+        "u2/t2/": [{"LastModified": datetime.now(UTC) - timedelta(days=3), "Size": 5}],
+    }
+    monkeypatch.setattr(reaper, "_iter_local_prefixes", lambda: fake)
+
+    prefixes, objects, size = reaper._local_orphans(set(), cutoff)
+
+    assert prefixes == ["u2/t2/"]
+    assert (objects, size) == (1, 5)
 
 
 def test_s3_prefixes_from_the_lister_match_live() -> None:
