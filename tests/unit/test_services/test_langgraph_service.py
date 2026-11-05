@@ -685,6 +685,38 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["thread_id"] == "thread-456"
         assert result["configurable"]["run_id"] == "run-789"
 
+    def test_create_run_config_ignores_client_user_id_override(self):
+        """A body-supplied configurable.user_id must not win over the authenticated one.
+
+        additional_config comes from the request body (and from assistant.config),
+        so `setdefault` used to let a client pin another identity into the config
+        that tools read (issue #2).
+        """
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"user_id": "victim", "user_display_name": "Victim"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=attacker_override)
+
+        assert result["configurable"]["user_id"] == "user-123"
+        assert result["configurable"]["user_display_name"] == "Test User"
+
+    def test_inject_user_context_overrides_client_user_id(self):
+        """Same rule at the helper level, for callers that skip create_run_config."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        result = inject_user_context(mock_user, {"configurable": {"user_id": "victim"}})
+
+        assert result["configurable"]["user_id"] == "user-123"
+
     def test_create_run_config_checkpoint_cannot_override_thread_id(self):
         """The checkpoint param is merged last; it must not redefine thread_id.
 
