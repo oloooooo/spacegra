@@ -677,9 +677,11 @@ def inject_user_context(user: Any | None, base_config: dict[str, Any] | None = N
 
     # All user-related data injection (only if user exists)
     if user:
-        # Basic user identity for multi-tenant scoping
-        config["configurable"].setdefault("user_id", user.identity)
-        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.identity)
+        # Basic user identity for multi-tenant scoping. Overwrite, don't setdefault:
+        # configurable comes from the request body, so a client-supplied user_id
+        # would otherwise win over the authenticated one (see issue #2).
+        config["configurable"]["user_id"] = user.identity
+        config["configurable"]["user_display_name"] = getattr(user, "display_name", None) or user.identity
 
         config["configurable"]["langgraph_auth_user"] = user
 
