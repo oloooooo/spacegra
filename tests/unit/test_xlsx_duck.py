@@ -289,6 +289,36 @@ def test_build_derived_keeps_columns_with_empty_header(tmp_path: Path, monkeypat
     ]
 
 
+def test_s3_manifest_is_written_last(tmp_path: Path, monkeypatch) -> None:
+    """s3 模式先传远端、再落本地清单：中途失败时本地不能留下指向空对象的清单。"""
+    import duckdb
+    from openpyxl import Workbook
+
+    try:
+        duckdb.connect().execute("LOAD excel")
+    except Exception:  # noqa: BLE001 - 没装 excel 扩展的环境跳过
+        pytest.skip("duckdb excel 扩展未安装")
+    source = tmp_path / "src.xlsx"
+    book = Workbook()
+    book.active.title = "数据"
+    book.active.append(["客户", "金额"])
+    book.active.append(["甲", 100])
+    book.save(source)
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
+    monkeypatch.setattr(duck.blobs, "bucket", lambda: "bench")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("对象存储不可用")
+
+    monkeypatch.setattr(duck.blobs, "put_bytes", boom)
+
+    with pytest.raises(RuntimeError, match="对象存储不可用"):
+        duck.build_derived(SHA, source, 0)
+
+    assert not duck._manifest_path(SHA, 0).exists()
+
+
 def test_size_limit_drops_whole_cache_group(tmp_path: Path, monkeypatch) -> None:
     """清单和 parquet 必须一起删：只删 parquet 会留下"清单在、数据没了"的目录（#10）。"""
     monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)

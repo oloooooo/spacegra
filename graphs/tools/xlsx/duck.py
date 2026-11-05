@@ -440,12 +440,13 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
         "rows": sum(s["rows"] for s in sheets),
         "built_at": int(time.time()),
     }
-    store.write_atomic(_manifest_path(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
+    # s3 模式先把远端写完整、再落本地清单：中途崩掉时本地清单不会指向不存在的远端对象
     if cache_mode() == "s3":
         for sheet in sheets:
             source_file = store_path(sha256, sheet["name"], header)
             blobs.put_bytes(remote_key(sha256, sheet["name"], header), source_file.read_bytes())
         blobs.put_bytes(_remote_manifest_key(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
+    store.write_atomic(_manifest_path(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
     _enforce_size_limit()
     return manifest
 
