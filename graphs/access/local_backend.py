@@ -1,6 +1,6 @@
 """本地混合 backend：把 ``FilesystemBackend`` 的逐条 ``resolve()`` 换成一趟 ``scandir``。
 
-设计依据是一次 A/B 基准（2026-10，见 ``docs/adr/0017-local-backend-scandir.md``）。
+设计依据是一次 A/B 基准（2026-10，见 ``docs/adr/archive/0017-local-backend-scandir.md``）。
 ``FilesystemBackend.ls``/``glob`` 的成本几乎全部不在遍历上，而在**每一条目录项各做
 一两次 ``Path.resolve()``**：Windows 上 resolve 走 ``nt._getfinalpathname``（实测
 0.055 ms/次），glob 里每条命中还要 ``is_file()`` + ``stat()`` + ``_to_virtual_path()``

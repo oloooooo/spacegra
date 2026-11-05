@@ -1,5 +1,8 @@
 # 本地 backend 改成「一趟 scandir」，不再逐条 resolve
 
+> **已归档**：本文是历史记录，不再约束当前代码；现行决定见 [`../README.md`](../README.md) 总表。
+> 归档于 2026-11-02：决定已固化进 `graphs/access/local_backend.py` 与 `tests/unit/test_local_backend.py`。
+
 > 状态：**已实现**（决定 2026-10-31）。
 > 落点：`graphs/access/local_backend.py`（`LocalBackend`）、`tests/unit/test_local_backend.py`。
 

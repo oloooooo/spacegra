@@ -4,7 +4,7 @@
 
 > ADR 是决策当时的快照，里面写的 env 名（如 `MAX_BLOB_MB`、`OKF_BACKEND`）现在多数已经搬到仓库根 `config.yaml`（§3.2）；旧环境变量名仍可作为覆盖值使用。以 [configuration.md](./configuration.md) 为准。
 >
-> ADR 是决策快照，但**路径已尽量对到当前布局**（2026-10 重构后的 `custom/api|service|middleware|db/`、`graphs/access|middleware/`、`shared/`）；只有 `adr/archive/` 里那 6 篇保留当时的写法。布局本身见 [`../CONTEXT.md`](../CONTEXT.md) 的「代码布局」。
+> ADR 是决策快照，但**路径已尽量对到当前布局**（2026-10 重构后的 `custom/api|service|middleware|db/`、`graphs/access|middleware/`、`shared/`）；只有 `adr/archive/` 里那 8 篇保留当时的写法。布局本身见 [`../CONTEXT.md`](../CONTEXT.md) 的「代码布局」。
 > 
 > 例外是每份 ADR 顶部的**状态行**：它是唯一必须跟着代码走的字段（`决定已定/实现未开始` → `已实现`），
 > 否则会像 ADR-0015/0016 那样，代码早就落地了、状态还停在「实现未开始」。
@@ -16,7 +16,7 @@
 | [streaming.md](./streaming.md) | **流式参考**：`client.stream` 结构与全部 9 种模式实测矩阵、aegra 模式处理与 `version="v2"` 硬编码、deepagents/`astream_events` 适配、v3 进程内✅/HTTP❌、前端 vs 调试选型、子图流不回传等坑、子 agent 流代理与 `async_tasks` 僵尸状态 |
 | [frontend-api.md](./frontend-api.md) | **前端接口参考**：`custom/api/` 下的前端接口（`account.py` 注册/登录/whoami + `graphs.py` 图清单 + `spaces.py` 空间与文件树/成员 + `tasks.py` 任务状态/流 + `uploads.py` 会话上传，共 11 个）+ 3 个内部接口（`delivery.py` 投递 ack 两个、`tasks.py` 取消）、鉴权与 token 时长、原生接口清单、SSE 帧契约（增量 / interrupt-resume / 回写消息识别）、定时任务实测行为、会话删除与已知限制 |
 | [S3.md](./S3.md) | **存储操作手册**：单机（本地目录）与集群（对象存储 + Mirage）两种形态的对照、起 SeaweedFS、全部相关 env（大小/配额/缓存/镜像/派生缓存）、上传接口与 key 布局、校验与排错、清理与容量对账 |
-| [adr/](./adr/README.md) | **决定记录**：现行 10 篇 + 历史 6 篇（`adr/archive/`）。索引里按编号列出「一句话结论 + 代码落点」，并给了按主题的阅读顺序（权限与空间 / 任务投递 / 配额 / 存储与上传） |
+| [adr/](./adr/README.md) | **决定记录**：现行 8 篇 + 历史 8 篇（`adr/archive/`）。索引里按编号列出「一句话结论 + 代码落点」，并给了按主题的阅读顺序（权限与空间 / 任务投递 / 配额 / 存储与上传） |
 
 其他相关文档：
 

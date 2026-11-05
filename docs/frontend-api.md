@@ -11,7 +11,7 @@
 |---|---|---|
 | `POST /custom/tasks/{task_id}/deliver-claim` | 主管侧拦截层 / 分发者 | 把发件箱行从 `pending` 原子翻成 `delivered`（[adr/0010](./adr/0010-task-delivery-idempotency.md)） |
 | `DELETE` 同名 | 同上 | 撤销认领 |
-| `POST /custom/tasks/{task_id}/cancel` | **前端**（侧栏任务卡「取消」） | 取消一个子任务。子线程属主是服务账号，用户 token 打不通原生 `cancel`，所以后端代理一次（[adr/0014](./adr/0014-no-hitl-for-eval.md)） |
+| `POST /custom/tasks/{task_id}/cancel` | **前端**（侧栏任务卡「取消」） | 取消一个子任务。子线程属主是服务账号，用户 token 打不通原生 `cancel`，所以后端代理一次（[adr/0014](./adr/archive/0014-no-hitl-for-eval.md)） |
 
 前者鉴权只允许父线程属主或服务身份；`cancel` 同样。
 
