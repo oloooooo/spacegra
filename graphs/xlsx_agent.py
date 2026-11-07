@@ -39,7 +39,7 @@ dotenv.load_dotenv()
 
 def xlsx_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
     """只看 `/uploads` 的 backend：Mirage 模式走 S3VFS，其余模式走本地会话目录。"""
-    if config.get("okf.backend") != "s3fs":
+    if config.backend_mode() != "s3fs":
         return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
     workspace = build_workspace(owner=owner, thread_id=thread_id, agents={XLSX_AGENT: ()})

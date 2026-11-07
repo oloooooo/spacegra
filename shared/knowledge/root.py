@@ -36,10 +36,6 @@ def local_root() -> Path:
     return (PROJECT_ROOT / config.get("okf.dir")).resolve()
 
 
-def backend_mode() -> str:
-    return str(config.get("okf.backend")).strip().lower()
-
-
 def mirror_root() -> Path:
     """`s3` 模式下的本地镜像目录；默认 `.cache/okf`（必须在 OKF 根之外）。"""
     return Path(config.get("okf.mirror_dir")).resolve()
@@ -55,7 +51,7 @@ def knowledge_root(*, force_pull: bool = False) -> Path:
     `s3` 模式：镜像不存在或已过 TTL 时拉一次。拉取失败**不**静默降级到本地盘——
     降级会让不同副本读到不同内容，比直接报错更难查（调用方会看到明确异常）。
     """
-    if backend_mode() != "s3":
+    if config.backend_mode() != "s3":
         return local_root()
     target = mirror_root()
     if force_pull or not target.is_dir() or _expired():

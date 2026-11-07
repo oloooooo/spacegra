@@ -40,8 +40,7 @@ UPLOADS_MOUNT = "/uploads/"
 
 def is_mirage_mode(config: dict | None = None) -> bool:
     """读文件是否走 Mirage（`okf.backend: s3fs`）。"""
-    cfg = app_config if config is None else config
-    return str(cfg.get("okf.backend")).strip().lower() == "s3fs"
+    return app_config.backend_mode(config) == "s3fs"
 
 
 def uploads_backend(config: dict) -> LocalBackend:

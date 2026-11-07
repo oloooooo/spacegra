@@ -117,7 +117,7 @@ def validate() -> None:
     前缀），本地目录里的字节它看不见。所以这种组合一旦配错，读上传文件会“静默空目录”，
     很难排查——直接在建模时抬错，把配置问题暴露在明面。
     """
-    if str(config.get("okf.backend")).strip().lower() != "s3fs":
+    if config.backend_mode() != "s3fs":
         return
     if store_mode() == "s3":
         return

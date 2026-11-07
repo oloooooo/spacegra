@@ -51,7 +51,7 @@ def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backen
     但能读父会话上传的文件（upload_scope 从拦截层转发的 upload_owner/upload_thread 取）。
     """
     space = _space_of(config_)
-    if config.get("okf.backend") != "s3fs" or not space:
+    if config.backend_mode() != "s3fs" or not space:
         return filesystem_backend(config_)
     owner, thread_id = upload_scope(config_)
     workspace = build_workspace(owner=owner, thread_id=thread_id, agents={space: (space,)})

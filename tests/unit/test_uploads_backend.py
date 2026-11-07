@@ -102,3 +102,11 @@ def test_mirage_mode_skips_local_route(env: Path, monkeypatch: pytest.MonkeyPatc
         ),
     )
     assert ub.is_mirage_mode() is True
+
+
+def test_mirage_mode_tolerates_case_and_padding(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置里写成 ` S3FS ` 也要走 Mirage：五个判定点统一用 backend_mode（issue #12）。"""
+    monkeypatch.setattr(app_config, "get", lambda key, *a, **kw: " S3FS " if key == "okf.backend" else a[0])
+    assert app_config.backend_mode() == "s3fs"
+    assert ub.is_mirage_mode() is True
+    assert app_config.backend_mode({"okf.backend": "S3fs "}) == "s3fs"
