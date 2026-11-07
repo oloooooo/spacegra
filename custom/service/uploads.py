@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from custom.db.models import SessionObject
 from shared import config
+from shared.paths import safe_segment
 from shared.session import blobs
 from shared.session.upload_rule import route_upload
 
@@ -36,6 +37,10 @@ logger = structlog.getLogger(__name__)
 #: 上传要按用户看到的文件名落到 /uploads 下，改名会让 agent 找不到。
 _BAD_CHARS = ("/", "\\", "\x00")
 _MAX_NAME = 200
+
+#: 本服务自己的临时/备份前缀：`.bak-` 是覆盖前的旧字节（同名上传的备份位）。
+#: 这类名字留给服务内部，用户占用会和备份撞名。
+_TEMP_PREFIXES = (".tmp-", ".bak-")
 
 
 class UploadError(Exception):
@@ -50,11 +55,12 @@ class UploadError(Exception):
 def safe_name(name: str) -> str:
     """校验上传文件名（保留原名，不做清洗）。"""
     name = (name or "").strip()
-    if not name or len(name) > _MAX_NAME:
-        raise UploadError("文件名不能为空，且最长 200 字符", 422)
-    if any(c in name for c in _BAD_CHARS) or name in {".", ".."}:
-        raise UploadError("文件名不能包含路径分隔符或 NUL", 422)
-    return name
+    if name.lower().startswith(_TEMP_PREFIXES):
+        raise UploadError("文件名不合法：前缀与本服务的临时文件冲突（.tmp- / .bak-），请改名", 422)
+    try:
+        return safe_segment(name, limit=_MAX_NAME)
+    except ValueError as e:
+        raise UploadError(f"文件名不合法：{e}", 422) from e
 
 
 def size_limit(name: str) -> int:

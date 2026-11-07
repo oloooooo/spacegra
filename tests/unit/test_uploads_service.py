@@ -55,3 +55,20 @@ class TestSizeLimit:
             lambda key: {"xlsx.max_blob_mb": 3, "session_files.max_upload_mb": 5}[key],
         )
         assert uploads.size_limit("A.XLSX") == 3 * 1024 * 1024
+
+
+class TestReservedNames:
+    """#14：Windows 设备名与本服务的临时文件前缀一律 422。"""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["CON", "con.txt", "NUL.xlsx", "COM1", "lpt9.json", "CON .txt", ".tmp-a.xlsx", ".TMP-a", ".bak-a.xlsx"],
+    )
+    def test_rejected(self, name: str) -> None:
+        with pytest.raises(uploads.UploadError) as e:
+            uploads.safe_name(name)
+        assert e.value.status_code == 422
+
+    @pytest.mark.parametrize("name", ["console.txt", "tmp-a.xlsx", "commander.md", "备份.bak"])
+    def test_similar_names_still_pass(self, name: str) -> None:
+        assert uploads.safe_name(name) == name
