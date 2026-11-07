@@ -181,9 +181,7 @@ class SessionObject(Base):
     )
 
     __table_args__ = (
-        # 配额查询：WHERE owner_identity=… 的 sum(size_bytes) / count(*)
-        Index("ix_session_object_owner", "owner_identity"),
-        # 删会话时按 (owner, thread) 找行
+        # 按 (owner, thread) 找行；不需要单列 owner_identity 索引——主键前导列已覆盖（issue #13）
         Index("ix_session_object_thread", "thread_id"),
     )
 
