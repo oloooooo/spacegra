@@ -21,7 +21,7 @@ import contextlib
 from typing import Any, BinaryIO
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,8 +101,15 @@ async def save_upload(
     key = blobs.upload_key(owner, thread_id, name)
     limit = size_limit(name)
 
-    # 配额：先数后插不是原子的，并发上传同名/多文件时可能超出 1~2 个。
-    # 这是软限制（真正挡人的是单文件大小），不值得为此加行锁。
+    # 会话级互斥：锁住 thread 行，直到本事务 commit。
+    # ① 同一会话的上传串行，配额计数才准（#13）；② run 创建路径里 set_thread_status
+    # 的 UPDATE 会在这把行锁上排队 —— 也就是说"发消息"不会插进上传的中间。
+    await session.execute(
+        text("SELECT thread_id FROM thread WHERE thread_id = :thread_id FOR UPDATE"),
+        {"thread_id": thread_id},
+    )
+
+    # 配额：计数与插入现在都在上面那把行锁里，同一会话不会并发越过上限。
     max_files = int(config.get("session_files.max_files_per_session"))
     existing = await session.scalar(
         select(SessionObject.sha256).where(
@@ -141,6 +148,8 @@ async def save_upload(
             "object_key": key,
             "sha256": sha256,
             "size_bytes": size,
+            # Core upsert 不会触发 `onupdate=func.now()`，必须显式写（#13）
+            "updated_at": func.now(),
         },
     )
     try:
