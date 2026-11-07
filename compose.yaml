@@ -1,0 +1,69 @@
+# 本项目依赖的容器：Redis（broker）+ SeaweedFS（S3 网关）。
+# Postgres 暂时用本机已有实例（宿主 5433），所以下面注释掉了。
+#
+#   docker compose up -d          # 起 redis + seaweedfs
+#   docker compose down           # 停（数据卷保留）
+#   docker compose down -v        # 停并删卷（SeaweedFS 的 bench-seaweed-data 也会被删）
+#
+# 端口可用环境变量覆盖：REDIS_PORT / SEAWEEDFS_S3_PORT / SEAWEEDFS_MASTER_PORT /
+# SEAWEEDFS_FILER_UI_PORT / POSTGRES_PORT。改完记得同步 config.yaml 的 s3.endpoint。
+#
+# 与老的手工容器并存时先停掉它们（端口和卷都冲突）：
+#   docker stop redis6 bench-seaweed
+# 只想沿用老端口（配置不用改）：SEAWEEDFS_S3_PORT=18333 docker compose up -d
+name: aegra-dev
+
+services:
+  redis:
+    image: redis:6-alpine
+    command: ["redis-server", "--save", "60", "1"]
+    ports:
+      # 只绑回环：应用在本机，SeaweedFS 没配 IAM 时网关是匿名的，别暴露到局域网
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  seaweedfs:
+    # S3 网关在容器内 8333；宿主默认也映射 8333（本机别人占用时改 SEAWEEDFS_S3_PORT）
+    image: chrislusf/seaweedfs:latest
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-ip.bind=0.0.0.0"]
+    ports:
+      - "127.0.0.1:${SEAWEEDFS_S3_PORT:-8333}:8333"  # S3 网关，应用唯一需要的一个
+      # 下面两个只在调试时用（看集群状态 / 浏览文件），默认不开
+      # - "127.0.0.1:${SEAWEEDFS_MASTER_PORT:-9333}:9333"
+      # - "127.0.0.1:${SEAWEEDFS_FILER_UI_PORT:-8888}:8888"
+    volumes:
+      - seaweedfs-data:/data
+    restart: unless-stopped
+
+  # 本机已有 postgres:16-alpine（宿主 5433），先不放进 compose。
+  # 需要时取消注释，并把 .env 的 POSTGRES_PORT 设成 POSTGRES_PORT 的值。
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  #     POSTGRES_DB: ${POSTGRES_DB:-aegra}
+  #   ports:
+  #     - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
+
+volumes:
+  redis-data:
+  # SeaweedFS 的对象数据（S3 桶内容）；down -v 会连它一起删。
+  seaweedfs-data:
+    name: aegra-seaweedfs-data
+  # postgres-data:
