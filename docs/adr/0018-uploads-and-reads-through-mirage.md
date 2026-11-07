@@ -1,14 +1,16 @@
-# 上传重建：对象存储是唯一真相，读路径全走 Mirage
+# 上传重建：字节与读路径都可切，集群走 Mirage
 
 > 状态：**已实现**（决定 2026-11-01）。
-> 落点：`graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
+> 落点：`graphs/access/mirage_backend.py`、`graphs/access/uploads_backend.py`、
+> `shared/session/uploads.py`（上传介质层）、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
 > `graphs/supervisor.py`、`graphs/space_agent.py`、`graphs/access/spaces.py`（`upload_scope`）、
 > `graphs/middleware/async_task_guard.py`（`_config_for` 转发上传目录）、
 > `custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py`、
 > `shared/session/blobs.py`（`upload_prefix`/`upload_key`）、`custom/db/models.py`（`target_agent`）、
-> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*`。
-> 取代：[`archive`](../adr/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
-> `feat/unified-files-s3` 分支上的 ADR-0017（同名不同内容）不采用。
+> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `uploads.*`。
+> 取代：[`archive`](./archive/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
+> `feat/unified-files-s3` 分支上的另一份 ADR-0017（与本仓库**已归档**的
+> [0017](./archive/0017-local-backend-scandir.md) 同号不同内容）不采用。
 
 ## 背景
 
@@ -122,17 +124,22 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    同一份表在任何实例上解析结果完全一致，可以跨机共享；表改了、或者用不同表头行号
    查同一份文件，自然换新目录，不用失效逻辑。
 2. **介质用配置切**：`xlsx.cache_mode` = `local`（默认，只落本机）/ `s3`（多实例共享：
-   先查本地、未命中从对象存储拉一份回来）。`s3` 但没配对象存储时自动降级成 `local`，
+   查询时由 DuckDB 直接 `read_parquet('s3://…')` 边读边算，**不依赖本地缓存目录**——
+   任何实例都不必预置或共享磁盘）。`s3` 但没配对象存储时自动降级成 `local`，
    不会因为配置写错而全线报错。**没有 `off`**：不建缓存意味着每次查询重新解析（40 s 级），
    那不是能交给运维去切的旋钮。
 3. **落盘必须原子**：`store.write_atomic`（同目录临时文件 + `os.replace` + 冲突重试）。
    两个 worker 同时建同一张表时字节相同，但直接 `write_bytes` 会让读者拿到半截 Parquet；
    Windows 上 `os.replace` 并发替换同一目标还会回 `PermissionError`，所以"对方已写完就
    接受"。清单（`manifest.json`）最后写，看到清单就说明 parquet 齐全。
-4. **闸门不放松**：`where` 仍是模型写的 SQL 谓词，`_check_where` 禁分号、DDL 与
-   `select`/`read_*`/`glob` 这类表函数（无子查询则调不到表函数），连接再限定
-   `allowed_directories` 且 `lock_configuration`；`columns` 只按清单里的列名过滤。
-   DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这层白名单。
+4. **闸门不放松**：`where` 仍是模型写的 SQL 谓词。两道：`_check_where` 先禁分号、注释与
+   `read_*`/`glob`/`attach` 这类名字（字符串字面量先屏蔽，`备注 = 'a--b'` 这种是数据不是注释）；
+   `_check_predicate` 再让 DuckDB 把谓词解析成语法树，按节点白名单放行（列引用、字面量、
+   `CASE`、比较/逻辑运算、少数纯函数如 `date_part`/`starts_with`/`nullif`），**子查询、
+   表函数、陌生函数一律拒**。`local` 模式另外关掉 `enable_external_access` 并把
+   `allowed_directories` 限定到派生目录；`s3` 模式要直读对象存储，外部访问必须开着，此时注入面
+   全压在语法树白名单上（ADR-0018 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
+   DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这两层。
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
 派生对象用 `scripts/reap_upload_orphans.py --xlsx-cache-days N --apply` 按 LastModified
@@ -140,25 +147,73 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 一起删，否则本机会一直指向已不存在的对象）。升级后旧的
 `<cache_dir>/*.sqlite`（老索引文件）已经没人读，可以直接删。
 
+### 9. 单机也能跑：上传介质与读路径解耦
+
+对象存储不是所有部署的前提。单机 / 内网 demo / 评测机常常只有一个进程和一块盘，
+让人先架一套 S3 才能上传文件是说不过去的。所以把「字节存在哪」单独拎出来成一个旋钮，
+和「知识空间怎么读」正交：
+
+| `okf.backend` | `uploads.store` | 上传字节落在 | 读 `/uploads` 的路径 |
+| --- | --- | --- | --- |
+| `local`（缺省） | `fs` | `data/uploads/<owner>/<thread>/` | `LocalBackend` 直读，`CompositeBackend` 路由到 `/uploads/` |
+| `s3`（镜像） | `s3` | 对象存储 `uploads/…` | 首次读拉到同一本地目录再直读（`materialize`） |
+| `s3fs` | `s3`（强制） | 对象存储 `uploads/…` | Mirage 的 `S3VFS` 直读，不经过本模块 |
+
+三条约束：
+
+1. **介质按配置选**：`uploads.store` = `auto`（默认，配了 `s3.endpoint` 就是 `s3`，否则 `fs`）
+   / `fs` / `s3`。同一份代码在单机和集群上都跑，切换只改配置，不换分支、不装可选依赖。
+2. **本地读路径不引入 Mirage**：`local` 模式下 `/` 仍是 `SpaceBackend`（ADR-0005 / [ADR-0017](./archive/0017-local-backend-scandir.md)），
+   `/uploads/` 是 `graphs/access/local_backend.py` 的只读 `LocalBackend`，用
+   `CompositeBackend` 拼起来。基准（决定 3 与背景）已经说清楚：本地盘上 Mirage 更慢
+   （单文件读 0.91ms vs 0.53ms，`grep` 慢 19–38×），没有理由为一致性付这个钱。
+3. **组合错了要吵起来**：`s3fs` 只看得见对象存储里的 `uploads/`，所以
+   `uploads.validate()` 在这个组合下强制 `store == s3`，否则建模时直接抛错——
+   否则症状是「目录明明是空的」，排查成本远高于一次启动失败。
+
+介质层是 `shared/session/uploads.py` 一个文件：`put_stream`（本地写同目录临时文件再
+`os.replace`，对象存储走 `blobs.put_stream`）、`materialize`（`fs` 直接返回、`s3` 缺本地
+副本时拉一份）、`delete` / `delete_thread` / `iter_local_keys`。两种介质下
+台账（`session_object`）、路由（`upload_rule`）、配额、删会话清理完全共用一套代码。
+清理脚本 `scripts/reap_upload_orphans.py` 两种介质都扫：对象存储按 `LastModified`、
+本地按文件 mtime，都带 24h 窗口，避免删掉「字节已落、行未写」的在途上传。
+
 ## 代价与已知风险
 
 - **`grep` 慢**：L 档全库 grep 1839ms（S3）vs 宿主 ripgrep 351ms；S 档快（8.6ms vs 22.3ms）。
   真要做大范围检索，应绕开 Mirage 用宿主 ripgrep，再把命中文件交给 Mirage 读。
-- **每 run 冷启动 200–400ms**：能接受是因为池会复用；单次会话首次提问会感觉到。
+- **每 run 新建 Workspace**：S3 客户端进程级共用后，非首个 run 约 **12ms**（构造 ~1ms，贵的是
+  每个新 `S3VFS` 的第一次操作）；进程内第一个 run 仍要付 ~200ms（botocore 冷启 + 首次 LIST）。
+  池已删除，代价是每个 run 重建一次索引缓存（Redis 里的旧条目按 TTL 过期，不阻塞）。
+- **每 run 一次同步 Redis 往返**：`mirage.redis_url` 非空时，`build_workspace` 建 3 个 Redis store
+  （两个 mount 的索引 + 一个 workspace 文件缓存）。实测中位 **5.4ms**（20 次，min 4.4 / max 29.8）：
+  3 个 `Redis.from_url` client 是惰性的（不建连）；真正的一次 I/O 是文件缓存构造时
+  `mirage/vfs/redis/store.py:62-64` 的同步 `sadd(<root>, "/")`——**0.42ms（中位）/ 0.57ms（p95）**，
+  每 run 一条新 TCP（实测 20 次 build 恰好新增 20 条）。**为什么不修**：`RedisIndexConfig` /
+  `RedisCacheConfig` 只有 `url` + `key_prefix`，`build_index` / `build_file_cache` 都不透传 client，
+  `Workspace(cache=…)` 收的也是配置而非实例；只能改 mirage 或猴补 `RedisStore.__init__`（版本升级
+  会静默失效）。0.4ms/run 换不来这个风险。**重看条件**：Redis 变成远程（RTT 1–3ms），或出现
+  高并发批量建 Workspace 的场景。
 - **没有 `execute`**：这是刻意的（见决定 2）。要跑代码只能靠 `CodeInterpreterMiddleware`
   的量化解释器，不能拿到 shell。
-- **两个 S3 client**：`/` 和 `/uploads` 各一个 `S3VFS`（两套连接池），每 run 两个。
+- **两个 `S3VFS`、一份 S3 客户端**：`/` 与 `/uploads` 各一个 VFS，但共用进程级的 aioboto3 client
+  （连接池一份，默认上限 10 条）；两个 VFS 的 `close()` 都不会关掉这份 client，由
+  `shared/lifecycle.py` 在进程退出时统一关。
 - **只有异步方法**：Mirage 适配层不实现同步 `ls/read/...`，deepagents 侧一律走 `a*`。
-- **本地盘模式没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / ADR-0017），
-  上传目录在本地模式下不存在，`xlsx` 子 agent 也不挂。
+- **本地盘模式读路径没换**：`okf.backend: local` 仍走 `SpaceBackend`（ADR-0005 / [ADR-0017](./archive/0017-local-backend-scandir.md)），
+  上传目录由 `LocalBackend` 挂在 `/uploads/`（ADR-0018 §9），不上 Mirage。
+- **本地上传目录不是共享存储**：`uploads.store=fs` 下多实例各存各的盘，会话被调度到
+  另一台就看不见自己的文件。多实例必须用 `s3`；这一点靠部署文档约束，代码不探测。
 - **派生缓存要占第二份存储**：Parquet 通常比 xlsx 小（列裁剪 + ZSTD），但 80k 行级别
   仍是 MB 级；`s3` 模式下对象数随"表 × sheet × header"增长，靠 TTL 回收。
 - **每次都先付解析费**：没有"不物化"的捷径，小表也要写一次 Parquet（20ms 级）。
   这是删掉 SQLite 换来的单一实现代价。
-- **首次查询付解析费**：`s3` 模式下如果本实例没缓存过这张表，要解析 + 上传；
-  冷路径比 `local` 多一次网络往返（实测小文件 8ms / 单 sheet 拉回 34–67ms）。
-- **DuckDB 没有细粒度 authorizer**：`allowed_directories` 挡不住所有表函数，真正的护栏
-  是 `_check_where` 的白名单（禁 `select`/`read_*`/`glob`）。改这块代码要一起改测试。
+- **首次查询付解析费**：任何实例没建过这份派生文件时，要解析 + 上传；`s3` 模式的查询
+  每次走对象存储（列裁剪 + 谓词下推，Range GET），结果集小的时候比读本机盘慢一截，
+  但没有"本地副本过期"这种状态。
+- **DuckDB 没有细粒度 authorizer**：`allowed_directories` 挡不住所有表函数，`s3` 模式下
+  外部访问还必须开着，真正的护栏是 `_check_predicate` 的语法树白名单。改这块代码要
+  一起改测试。
 
 ## 被否决的备选
 
@@ -169,4 +224,5 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    不适合做 HTTP 入口。写用 boto3，读用 Mirage，边界清楚。
 3. **Deep Agents 的 `StoreBackend`**：文件进 PG 的 Store，大对象不合适（ADR-0016 的问题）。
 4. **每 run 新建 Workspace**：语义最干净，但冷启动每轮都付，且拿不到 run 收尾钩子时
-   泄漏的连接比池化更难排查。
+   泄漏的连接比池化更难排查。现在的折中是：删池 + 共用 S3 客户端 + `run_scope` 在 run
+   结束时关 Workspace（代价与残留见上一节的“每 run 一次同步 Redis 往返”）。
