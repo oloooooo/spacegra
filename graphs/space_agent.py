@@ -27,12 +27,10 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
-from graphs.access.spaces import allowed_spaces, upload_scope
+from graphs.access.spaces import allowed_spaces
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
 from graphs.tools import XLSX_TOOLS
-from shared import config
 from shared.knowledge.spec import has_tables, load_agent_spec
 
 dotenv.load_dotenv()
@@ -44,18 +42,9 @@ def _space_of(config: RunnableConfig) -> str:
     return next(iter(sorted(spaces)), "") if spaces else ""
 
 
-def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """子 agent 的只读 backend：本地磁盘按 space 隔离（ADR-0005）或 Mirage（ADR-0018）。
-
-    Mirage 模式下 profile = `hide "/" + show /<space> + /uploads`：空间看不见同级空间，
-    但能读父会话上传的文件（upload_scope 从拦截层转发的 upload_owner/upload_thread 取）。
-    """
-    space = _space_of(config_)
-    if config.backend_mode() != "s3fs" or not space:
-        return filesystem_backend(config_)
-    owner, thread_id = upload_scope(config_)
-    workspace = build_workspace(owner=owner, thread_id=thread_id, agents={space: (space,)})
-    return for_agent(workspace, space)
+def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— backend
+    """子 agent 的只读 backend：本地磁盘按 space 隔离（ADR-0005）+ 本会话 `/uploads`。"""
+    return filesystem_backend(config_)
 
 
 def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的图
@@ -80,15 +69,12 @@ def graph(config: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的
     # 子图不再需要任何通知中间件。
 
     backend = space_backend(config)
-    return run_scope(
-        create_deep_agent(
-            model=model,
-            system_prompt=system_prompt,
-            tools=tools,
-            middleware=middleware,
-            # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
-            backend=backend,
-            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
-        ),
-        backend,
+    return create_deep_agent(
+        model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        middleware=middleware,
+        # 子 agent 同样按 space 隔离：spaces 来自拦截层经 run config 转发的 user_spaces。
+        backend=backend,
+        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
     )

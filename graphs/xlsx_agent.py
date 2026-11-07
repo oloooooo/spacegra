@@ -11,9 +11,8 @@ aegra.json 注册::
 - 它不能是领域 agent：领域 agent 的 prompt 来自 ``knowledge/<space>/AGENT.md``，而且它的
   backend 只 show 自己那个空间——那样就看不见 `/uploads`。
 
-可见范围由 ``MirageBackend`` 的 profile 决定：``agents={XLSX_AGENT: ()}`` → 只 show `/uploads`。
-本地磁盘模式（``okf.backend: local``）没有上传目录，这时它退化成"什么都没有"的空 agent：
-`ls /` 只会看到知识根下允许的东西——所以本地模式下不挂这个子 agent（见 ``graphs/supervisor.py``）。
+可见范围：`filesystem_backend` 的本会话 `/uploads` 路由——它只挂着一个会话的上传目录，
+知识空间走默认 backend（按 `allowed_spaces` 决定）。
 """
 
 from __future__ import annotations
@@ -25,45 +24,34 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
-from graphs.access.spaces import upload_scope
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.model import model
 from graphs.prompts import XLSX_SYSTEM_PROMPT
 from graphs.tools import XLSX_TOOLS
-from shared import config
-from shared.session.upload_rule import XLSX_AGENT
 
 dotenv.load_dotenv()
 
 
-def xlsx_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """只看 `/uploads` 的 backend：Mirage 模式走 S3VFS，其余模式走本地会话目录。"""
-    if config.backend_mode() != "s3fs":
-        return filesystem_backend(config_)
-    owner, thread_id = upload_scope(config_)
-    workspace = build_workspace(owner=owner, thread_id=thread_id, agents={XLSX_AGENT: ()})
-    return for_agent(workspace, XLSX_AGENT)
+def xlsx_backend(config_: RunnableConfig):  # noqa: ANN201 —— backend
+    """只看 `/uploads` 的 backend：本会话的上传目录在本地盘上。"""
+    return filesystem_backend(config_)
 
 
 def graph(config_: RunnableConfig) -> Any:  # noqa: ANN401 — 返回编译后的图
     """建通用表格子 agent。"""
     backend = xlsx_backend(config_)
-    return run_scope(
-        create_deep_agent(
-            model=model,
-            system_prompt=XLSX_SYSTEM_PROMPT,
-            tools=[],
-            middleware=[
-                CodeInterpreterMiddleware(
-                    mode="turn",
-                    ptc=XLSX_TOOLS,  # pyright: ignore[reportArgumentType]
-                    timeout=120,
-                    max_result_chars=10000,
-                )
-            ],
-            backend=backend,
-            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
-        ),
-        backend,
+    return create_deep_agent(
+        model=model,
+        system_prompt=XLSX_SYSTEM_PROMPT,
+        tools=[],
+        middleware=[
+            CodeInterpreterMiddleware(
+                mode="turn",
+                ptc=XLSX_TOOLS,  # pyright: ignore[reportArgumentType]
+                timeout=120,
+                max_result_chars=10000,
+            )
+        ],
+        backend=backend,
+        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
     )

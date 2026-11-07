@@ -25,14 +25,13 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain.tools import InjectedToolArg, ToolRuntime, tool
 from langgraph.graph.state import RunnableConfig
 
-from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
-from graphs.access.spaces import allowed_spaces, upload_scope
+from graphs.access.spaces import allowed_spaces
 from graphs.access.uploads_backend import filesystem_backend
 from graphs.middleware.async_task_guard import AsyncTaskGuard
 from graphs.prompts import MAIN_SYSTEM_PROMPT
 from graphs.tools import MAIN_TOOLS
 from shared.knowledge.spec import list_spaces, load_agent_spec, space_dir
-from shared.session.upload_rule import MAIN_AGENT, XLSX_AGENT
+from shared.session.upload_rule import XLSX_AGENT
 
 logger = structlog.getLogger(__name__)
 
@@ -72,11 +71,6 @@ _GRAPH_ID = "domain_agent"  # 领域子 agent：一个图服务所有空间
 _XLSX_GRAPH_ID = "xlsx_agent"  # 通用 xlsx 子 agent：只看得见 /uploads
 # 服务自己调自己的地址；容器/换端口在 config.yaml 的 agents.server_url 改
 _SERVER_URL = config.get("agents.server_url")
-
-
-def _mirage_mode() -> bool:
-    """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
-    return config.backend_mode() == "s3fs"
 
 
 def _visible_spaces(config: RunnableConfig) -> list[str]:
@@ -120,44 +114,32 @@ def domain_specs(config: RunnableConfig) -> dict[str, dict]:
     return specs
 
 
-def supervisor_backend(config: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """主管的存储路由：Mirage（s3fs）或 本地磁盘（knowledge + 本会话 /uploads）。"""
-    if not _mirage_mode():
-        return filesystem_backend(config)
-    owner, thread_id = upload_scope(config)
-    logger.info("mirage_backend", owner=owner, thread_id=thread_id)
-    workspace = build_workspace(
-        owner=owner,
-        thread_id=thread_id,
-        agents={MAIN_AGENT: _visible_spaces(config), XLSX_AGENT: ()},
-    )
-    return for_agent(workspace, MAIN_AGENT)
+def supervisor_backend(config: RunnableConfig):  # noqa: ANN201 —— backend
+    """主管的存储路由：知识空间 + 本会话 `/uploads`（都在本地盘上）。"""
+    return filesystem_backend(config)
 
 
 def graph(config: RunnableConfig):  # noqa: ANN201 — 返回编译后的图
     """主管图（工厂图）：子 agent 名单每次 run 现算，见 domain_specs。"""
     specs = domain_specs(config)
     backend = supervisor_backend(config)
-    return run_scope(
-        create_deep_agent(
-            model=model,
-            system_prompt=MAIN_SYSTEM_PROMPT,
-            # xlsx 工具不在主 agent 手里：主 agent 能看见所有上传文件，但表格分析一律派给
-            # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0018。
-            tools=[*MAIN_TOOLS],
-            # 按空间隔离的 backend（ADR-0005 / ADR-0018）
-            backend=backend,
-            context_schema=deepAgentContext,
-            # 拆任务清单（write_todos）；guard 拦截 start/update_async_task：按 spec 绑定的
-            # space 经 run config 转发给子 agent（ADR-0005）+ 并发上限
-            middleware=[
-                TodoListMiddleware(),
-                AsyncTaskGuard(specs),
-            ],
-            subagents=[*specs.values()],
-            permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
-        ),
-        backend,
+    return create_deep_agent(
+        model=model,
+        system_prompt=MAIN_SYSTEM_PROMPT,
+        # xlsx 工具不在主 agent 手里：主 agent 能看见所有上传文件，但表格分析一律派给
+        # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0018。
+        tools=[*MAIN_TOOLS],
+        # 按空间隔离的 backend（ADR-0005 / ADR-0018）
+        backend=backend,
+        context_schema=deepAgentContext,
+        # 拆任务清单（write_todos）；guard 拦截 start/update_async_task：按 spec 绑定的
+        # space 经 run config 转发给子 agent（ADR-0005）+ 并发上限
+        middleware=[
+            TodoListMiddleware(),
+            AsyncTaskGuard(specs),
+        ],
+        subagents=[*specs.values()],
+        permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],
     )
 
 

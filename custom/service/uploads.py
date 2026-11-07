@@ -1,12 +1,12 @@
-"""上传：字节进对象存储，元数据进 `session_object`（ADR-0018）。**本函数自己 commit**。
+"""上传：字节进本地目录，元数据进 `session_object`（ADR-0018）。**本函数自己 commit**。
 
-两本账的分工：对象存储是真相（key = ``uploads/<owner>/<thread>/<文件名>``），
+两本账的分工：本地盘是真相（`data/uploads/<owner>/<thread>/<文件名>`，台账里记相对 key），
 `session_object` 行回答"这个会话里有哪些文件、该派给谁"。**读路径不查这张表**
 （Mirage 直接按前缀列对象），只有上传写入、配额、删会话清理会用到它。
 
 写序不可换（与旧 ADR-0013 同一条教训）：
 
-1. 把字节写进对象存储（``blobs.put_stream``，边写边算 sha256，超限自己 abort）；
+1. 把字节写进本地介质（``uploads.put_stream``，边写边算 sha256，超限自己 abort）；
 2. 再 upsert 台账行 —— 行里带上传那一刻算好的投递目标 ``target_agent``。
 
 崩在 1 和 2 之间的后果：多一个没人认领的对象（下次同名上传按覆盖处理），
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import uuid
 from typing import Any, BinaryIO
 
 import structlog
@@ -29,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from custom.db.models import SessionObject
 from shared import config
 from shared.paths import safe_segment
-from shared.session import blobs
+from shared.session import uploads as upload_store
 from shared.session.upload_rule import route_upload
 
 logger = structlog.getLogger(__name__)
@@ -93,13 +92,12 @@ async def save_upload(
     src: BinaryIO,
     spaces: list[str],
 ) -> dict[str, Any]:
-    """写一个上传文件，返回给 HTTP 层的摘要。调用方负责 commit。
+    """写一个上传文件，返回给 HTTP 层的摘要。**本函数自己 commit**。
 
     `spaces` 是**上传者当下**的空间集，只用来算 `target_agent`；它不参与鉴权
     （鉴权由路由层的 `_authorize_thread` + 空间成员表决定）。
     """
     name = safe_name(name)
-    key = blobs.upload_key(owner, thread_id, name)
     limit = size_limit(name)
 
     # 会话级互斥：锁住 thread 行，直到本事务 commit。
@@ -122,27 +120,29 @@ async def save_upload(
     if existing is None and await count_files(session, owner, thread_id) >= max_files:
         raise UploadError(f"每个会话最多 {max_files} 个上传文件", 409)
 
-    # 覆盖同名文件会把旧字节冲掉：先复制一份备份，落库/提交失败再换回来（#7）。
-    backup: str | None = None
-    if await asyncio.to_thread(blobs.stat, key) is not None:
-        backup = f"{blobs.upload_prefix(owner, thread_id)}.bak-{uuid.uuid4().hex}"
-        # 备份失败就直接抛：没有旧字节的副本，覆盖是不安全的。
-        await asyncio.to_thread(blobs.copy, key, backup)
+    # 覆盖同名文件会把旧字节冲掉：先挪到备份位，落库/提交失败再换回来（#7）。
+    backup = await asyncio.to_thread(upload_store.backup, owner, thread_id, name)
 
     async def _revert() -> None:
         with contextlib.suppress(Exception):
             if backup is None:
-                await asyncio.to_thread(blobs.delete, key)
+                await asyncio.to_thread(upload_store.delete, owner, thread_id, name)
             else:
-                await asyncio.to_thread(blobs.copy, backup, key)
-                await asyncio.to_thread(blobs.delete, backup)
+                await asyncio.to_thread(upload_store.restore, owner, thread_id, name, backup)
 
     try:
-        sha256, size = await asyncio.to_thread(blobs.put_stream, src, key, max_bytes=limit)
-    except blobs.BlobTooLarge as e:
+        key, sha256, size = await asyncio.to_thread(
+            upload_store.put_stream,
+            src,
+            owner=owner,
+            thread_id=thread_id,
+            name=name,
+            max_bytes=limit,
+        )
+    except upload_store.UploadTooLarge as e:
         raise UploadError(str(e), 413) from e
-    except blobs.BlobUnavailable as e:
-        raise UploadError("对象存储暂不可用，请稍后重试", 503) from e
+    except upload_store.UploadUnavailable as e:
+        raise UploadError("上传存储暂不可用，请稍后重试", 503) from e
 
     target = route_upload(name, spaces)
     space = next((s for s in spaces if target == s), "")
@@ -175,8 +175,7 @@ async def save_upload(
         await _revert()
         raise
     if backup is not None:
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(blobs.delete, backup)
+        await asyncio.to_thread(upload_store.drop_backup, owner, thread_id, backup)
 
     logger.info(
         "upload_saved",

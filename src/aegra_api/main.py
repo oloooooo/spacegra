@@ -42,6 +42,7 @@ from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
 from aegra_api.services.run_preparation import get_default_durability
+from aegra_api.services.run_status import close_unleased_runs
 from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
 from aegra_api.settings import settings
 from aegra_api.utils.setup_logging import setup_logging
@@ -96,7 +97,7 @@ def _log_connection_help(error: Exception) -> None:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI)-> AsyncGenerator[None]:
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """FastAPI lifespan context manager for startup/shutdown"""
     # Resolve the durability default up front: an invalid value fails the boot, not every run.
     get_default_durability()
@@ -145,6 +146,12 @@ async def lifespan(_app: FastAPI)-> AsyncGenerator[None]:
             "or horizontal scaling. Set REDIS_BROKER_ENABLED=true and configure "
             "REDIS_URL for production use.",
         )
+        # 本地模式没有租约、也没有 reaper：上一条命留下的 running 行会永久卡住 thread
+        # （上传按 pending/running 拒写）。新进程不可能持有在途 run，所以启动时直接回收。
+        try:
+            await close_unleased_runs()
+        except Exception:
+            logger.warning("runs.repair_failed", exc_info=True)
 
     # Start broker manager (cleanup task for in-memory, cancel listener for Redis)
     await broker_manager.start()

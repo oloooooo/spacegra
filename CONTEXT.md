@@ -25,7 +25,7 @@ Run 的唯一状态字段。终态只有 success / error / timeout / interrupted
 _Avoid_: 状态机阶段、phase
 
 **派生缓存（derived cache）**:
-xlsx 的 Parquet 副本。目录是**上传字节的 sha256 + 表头行号**（`<sha256>/h<header>/`），每个 sheet 一份，表第一次被查时才建；`xlsx.cache_mode` 决定只落本机（local）还是把派生对象写到对象存储并**直读**（s3，多实例不需要本地缓存目录）。它不是真相，删了只会让下次查询多解析一遍。
+xlsx 的 Parquet 副本。目录是**上传字节的 sha256 + 表头行号**（`<sha256>/h<header>/`），每个 sheet 一份，表第一次被查时才建；只落本机（跨实例共享缓存见 `mirage-s3` 分支）。它不是真相，删了只会让下次查询多解析一遍。
 _Avoid_: 索引缓存（`index.py` 已删除）、临时文件
 
 
@@ -190,8 +190,8 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
   上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
-FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传读路径经 Mirage 在
-`graphs/access/mirage_backend.py`，上传写路径在 `custom/api/uploads.py`，规则见 ADR-0018。）
+FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传写路径在
+`custom/api/uploads.py`，读路径是 `graphs/access/uploads_backend.py` 里的 `/uploads` 路由，规则见 ADR-0018。）
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。
 _Avoid_: 往 `graphs/` 里放数据；在 `custom/` 里放图侧要用的模块（要放就放 `shared/`）；

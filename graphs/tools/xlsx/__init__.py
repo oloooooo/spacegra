@@ -17,7 +17,7 @@ agent 视角::
     xlsx_profile(path)                                # 空值/重复/类型/数值范围画像
 
 为什么必须先物化：80k×10×3 的表现在一次全读 41.7 s，转成列式文件后 `WHERE … LIMIT 200`
-是 2 ms。派生缓存放本机还是对象存储由 `xlsx.cache_mode` 决定（`s3` 模式查询直接读
+是 2 ms。派生缓存只落本机（`xlsx.cache_dir`）；要跨实例共享缓存请换 `mirage-s3` 分支。
 对象存储，多实例不必共享磁盘）；它是可重建的中间产物，不是真相——删了只会让下次
 查询多解析一遍（ADR-0018 §8）。
 """
@@ -29,6 +29,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from graphs.access.spaces import allowed_spaces
+from graphs.access.uploads_backend import upload_path
 from graphs.tools.xlsx import duck, store
 from graphs.tools.xlsx.schema import (
     XlsxHeader,
@@ -74,9 +75,10 @@ def _check_scope(path: str | Path, config: object) -> None:
     if not parts:
         return  # "/" 本身；ls 类调用方自己按规则过滤
     first = parts[0]
-    if first == "uploads" and _mirage_mode():
-        # 见上加粗两行：上传文件由 API 侧按会话鉴权，profile 又只挂本会话那一个目录，
-        # 这里不按空间名判。判定落在**解析后**的首段上，`/uploads/../x/…` 仍会被下面拦住。
+    if first == "uploads":
+        # `/uploads/<name>` 是本会话的上传目录（backend 里挂成一条路由），只允许一层名字
+        if len(parts) > 2:
+            raise ValueError(f"上传文件路径只能是一层：{path}")
         return
     if first in spaces:
         return  # 文件是否存在由 store.resolve_local 报
@@ -86,25 +88,14 @@ def _check_scope(path: str | Path, config: object) -> None:
     raise ValueError(f"无权访问 {path}：{first} 不在你的空间列表 {visible} 内")
 
 
-def _mirage_mode() -> bool:
-    """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
-    return app_config.backend_mode() == "s3fs"
-
-
 async def _local_copy(path: str, runtime: ToolRuntime) -> str:
-    """把虚拟路径下的 xlsx 落到本地缓存，返回本地路径。
-
-    本地磁盘模式原样返回（工具本来就是直接读盘的）；s3fs 模式对象存储里没有本地路径，
-    必须先取字节：pandas/openpyxl 读不了 HTTP，索引也要一个真实的文件。
-    """
-    if not _mirage_mode():
-        return path
-    from graphs.access.mirage_backend import download_bytes
-
-    data = await download_bytes(runtime.config, path)
-    if data is None:
-        raise FileNotFoundError(f"对象存储里没有 {path}")
-    return str(store.virtual_cache_path(path, data))
+    """`/uploads/<name>` 换成会话上传目录里的真实文件，其余虚拟路径就是本地路径。"""
+    if Path(path.lstrip("/\\")).parts[:1] == ("uploads",):
+        local = upload_path(runtime.config, path)
+        if local is None:
+            raise FileNotFoundError(f"会话里没有这个上传文件：{path}")
+        return str(local)
+    return path
 
 
 # ---------- 同步实现（跑在线程池里） ----------

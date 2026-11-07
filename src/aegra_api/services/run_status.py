@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, exists, or_, select, update
+from sqlalchemy import CursorResult, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,6 +113,40 @@ async def set_thread_status_if_no_active_runs(
         )
         .values(status=validated, updated_at=datetime.now(UTC))
     )
+
+
+async def close_unleased_runs() -> int:
+    """把死进程留下的 `running` run 改成 `error`，返回改了几行。
+
+    只在本地模式（没有 Redis broker、没有 worker 租约）启动时调用。安全性：新进程
+    不可能持有在途 run；worker 模式的 running 必然是 `worker_executor` 一条 UPDATE 同时写
+    `claimed_by` + `lease_expires_at` 出来的，所以“活着但没租约”只可能是死进程留下的。
+
+    不清理的话，崩溃一次就会让 thread 永远 `busy`：上传路由按 `status in ('pending','running')`
+    拒绝写入，用户只能手工改库。
+    """
+    maker = _get_session_maker()
+    async with maker() as session:
+        result = await session.execute(
+            text(
+                "UPDATE runs SET status = 'error', claimed_by = NULL, lease_expires_at = NULL, "
+                "error_message = :message "
+                "WHERE status = 'running' "
+                "AND (lease_expires_at IS NULL OR lease_expires_at < now()) "
+                "RETURNING run_id, thread_id, user_id"
+            ),
+            {"message": "进程退出时 run 未收尾（启动自检回收）"},
+        )
+        rows = result.all()
+        by_user: dict[str, list[str]] = {}
+        for _run_id, thread_id, user_id in rows:
+            by_user.setdefault(user_id, []).append(thread_id)
+        for user_id, thread_ids in by_user.items():
+            await set_thread_status_if_no_active_runs(session, thread_ids, "idle", user_id=user_id)
+        await session.commit()
+    if rows:
+        logger.warning("runs.repaired", count=len(rows))
+    return len(rows)
 
 
 async def interrupt_unowned_run(

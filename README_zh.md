@@ -82,7 +82,7 @@ OPENAI_MODEL=deepseek-flash
 quota:
   max_threads_per_user: 50   # 含子线程；一个会话派 3~5 个子任务就吃掉 3~5 个名额
 s3:
-  endpoint: http://127.0.0.1:8333   # 留空 = 不启用对象存储（okf.backend 只能填 local）
+  endpoint: http://127.0.0.1:8333   # 只有 scripts/okf_push_s3.py 会用；留空也能全跑
 ```
 
 > `PASSWORD_PEPPER` 一旦改动，**已注册的账号全部无法登录**（bcrypt 哈希不再匹配），需要重新注册或重置密码。
@@ -439,9 +439,8 @@ knowledge/bio-lab/
 **有 `.xlsx` 才会装 xlsx 四件套**（`xlsx_info/query/search/profile` + CodeInterpreterMiddleware），
 纯文档空间自动不装。
 
-> 空间知识也可以放对象存储（`config.yaml` 的 `okf.backend: s3`，多副本读到同一份）：改完跑
-> `scripts/okf_push_s3.py`，各副本跑 `scripts/okf_pull_s3.py`。全部配置与上传方式见
-> [docs/S3.md](./docs/S3.md)。
+> 想给别的机器看同一份知识，跑 `scripts/okf_push_s3.py` 推上去；本分支进程只读本地
+> `knowledge/`。全部配置见 [docs/S3.md](./docs/S3.md)。
 
 ### 11.4 验证（不用重启）
 

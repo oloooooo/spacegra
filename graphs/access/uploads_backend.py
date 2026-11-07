@@ -1,0 +1,68 @@
+"""`/uploads` 目录的只读 backend（本地目录版，ADR-0018 §9）。
+
+上传字节就落在 `data/uploads/<owner>/<thread>/`（`shared.session.uploads`），所以 agent
+侧只有一套读法：`LocalBackend` 挂在 `/uploads/` 路由上，知识空间留在默认 backend。
+
+用 ``LocalBackend`` 而不是 ``FilesystemBackend`` 的两个理由：它一次 ``scandir`` 遍历
+（本地盘上 glob/ls 快一个数量级），以及它按**内容**判定二进制——xlsx 会得到明确的
+"这是二进制，用表格工具"错误，而不是父类那种把 xlsx 当文本解码后的
+``UnicodeDecodeError``。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import structlog
+from deepagents.backends import CompositeBackend
+from deepagents.backends.protocol import BackendProtocol
+
+from graphs.access.backend import SpaceBackend
+from graphs.access.local_backend import LocalBackend
+from graphs.access.spaces import upload_scope
+from shared.knowledge.root import knowledge_root
+from shared.session import uploads
+
+logger = structlog.getLogger(__name__)
+
+#: 上传目录在 agent 视角下的挂载点（路由前缀必须带尾斜杠）
+UPLOADS_MOUNT = "/uploads/"
+
+
+def uploads_backend(config: dict) -> LocalBackend:
+    """当前 run 的 `/uploads` backend（只读、限制在本会话目录内）。
+
+    thread_id 由客户端定（`ENTITY_ID_PATTERN = r"\\S"`），像 `user:1` 这种拼不进路径：
+    此时挂一个空目录，run 照常跑、只是看不见任何上传，而不是每次建图都抛 500。
+    """
+    owner, thread_id = upload_scope(config)
+    try:
+        root = uploads.ensure_dir(uploads.local_dir(owner, thread_id))
+    except ValueError as e:
+        logger.warning("uploads.backend.unusable_scope", owner=owner, thread_id=thread_id, error=str(e))
+        root = uploads.ensure_dir(uploads.local_root() / "_unusable")
+    return LocalBackend(root, allow_write=False)
+
+
+def filesystem_backend(config: dict) -> BackendProtocol:
+    """完整 backend：知识空间 + 本会话上传目录。"""
+    return CompositeBackend(
+        default=SpaceBackend(root_dir=knowledge_root()),
+        routes={UPLOADS_MOUNT: uploads_backend(config)},
+    )
+
+
+def upload_path(config: dict, vpath: str) -> Path | None:
+    """把 `/uploads/x.xlsx` 解析成本地文件路径。
+
+    表格工具不走 backend（它要字节，不是文本），所以这里单独给一条同样受限的解析：
+    会话目录由 `upload_scope` 决定，文件名只允许单段（`/`、`..` 一律拒绝），
+    越界读不到别的会话的上传。
+    """
+    name = vpath.strip("/")
+    if name.startswith("uploads/"):
+        name = name[len("uploads/") :]
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        return None
+    owner, thread_id = upload_scope(config)
+    return uploads.materialize(owner, thread_id, name)

@@ -13,12 +13,10 @@ mtime + size」，跨机器不通用；SQLite 依赖文件锁语义，`cache_dir
 实例、任何机器上解析结果都一样，可以直接共享；查询用 DuckDB（`read_parquet`，
 列裁剪 + 谓词下推），跨 sheet/跨表就是一句 SQL。
 
-缓存介质（`xlsx.cache_mode`）
+缓存目录（`xlsx.cache_dir`）
 -----------------------------
-``local`` 只落本机缓存目录（单实例部署，最省事）；
-``s3``    派生文件写对象存储，查询时由 DuckDB 直接 ``read_parquet('s3://…')`` 边读边算——
-**不依赖本地缓存目录**，多实例/弹性伸缩时任何机器都不需要预置或共享磁盘（本地那份
-只是建缓存时的副产物，命中与否都不影响查询）。
+派生文件只落本机缓存目录，按内容哈希（sha256）命名；跨实例/share 的需求不在这条产品线上
+（要共享缓存就换 `mirage-s3` 分支，那里让 DuckDB 直读对象存储）。
 没有 ``off``：不建缓存意味着每次查询重新解析（80k 行级 40 s），这不是一个
 能交给运维去切的旋钮。
 
@@ -46,13 +44,10 @@ import threading
 import time
 import uuid
 from collections.abc import Collection, Iterator
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
-from urllib.parse import urlsplit
 
 from shared import config
-from shared.session import blobs
 
 from . import store
 
@@ -147,14 +142,6 @@ _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'|\$\$.*?\$\$", re.DOTALL)
 # ---------- 配置与路径 ----------
 
 
-def cache_mode() -> str:
-    """``local`` | ``s3``；s3 未配置对象存储时自动退回 local（配置写错不该全线报错）。"""
-    mode = str(config.get("xlsx.cache_mode")).strip().lower() or "local"
-    if mode != "s3":
-        return "local"
-    return "s3" if blobs.configured() else "local"
-
-
 def sql_policy() -> str:
     """``strict`` = 语法树白名单（默认）；``free`` = 只拦多条语句/注释，谓词原样交给 DuckDB。"""
     return str(config.get("xlsx.sql_policy")).strip().lower() or "strict"
@@ -180,17 +167,8 @@ def store_path(sha256: str, sheet: str, header: int = 0) -> Path:
     return _derived_dir() / _relative(sha256, header) / _sheet_file(sheet)
 
 
-def remote_key(sha256: str, sheet: str, header: int = 0) -> str:
-    """对象存储里的位置：``<xlsx.cache_prefix>/<sha256>/h<header>/<sheet>.parquet``。"""
-    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{_relative(sha256, header)}/{_sheet_file(sheet)}"
-
-
 def _manifest_path(sha256: str, header: int = 0) -> Path:
     return _derived_dir() / _relative(sha256, header) / "manifest.json"
-
-
-def _remote_manifest_key(sha256: str, header: int = 0) -> str:
-    return f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{_relative(sha256, header)}/manifest.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -205,16 +183,12 @@ def sha256_file(path: Path) -> str:
 
 
 def _connect(extra_dirs: Collection[Path] = ()):  # noqa: ANN202 —— duckdb 在可选依赖里
-    """内存库 + 锁配置；`local` 模式再关掉外部访问、只留允许读的目录。
+    """内存库 + 锁配置；关掉外部访问、只留允许读的目录。
 
     `where` 是模型写的谓词，是最外层的注入面。护栏分两层：`_check_predicate` 先做
-    文本检查、再按语法树白名单把关（子查询/表函数/陌生函数一律拒）；连接层在
-    `local` 模式下把 `enable_external_access` 关掉，`read_text`/`glob`/`read_csv`
-    即使被调进来也读不到禁止目录。
-
-    `s3` 模式下外部访问必须开着（DuckDB 要直读对象存储），此时本地/远端文件访问
-    只能靠语法树闸门拦住——这是刻意的取舍：多主机不依赖缓存目录，代价是注入面
-    全部压在谓词校验上。
+    文本检查、再按语法树白名单把关（子查询/表函数/陌生函数一律拒）；连接层把
+    `enable_external_access` 关掉，`read_text`/`glob`/`read_csv` 即使被调进来也读不到
+    禁止目录。
     """
     import duckdb
 
@@ -230,37 +204,15 @@ def _connect(extra_dirs: Collection[Path] = ()):  # noqa: ANN202 —— duckdb �
             "~/.duckdb/extensions/<duckdb 版本>/<平台>/excel.duckdb_extension）。"
             f"原始错误：{exc}"
         ) from exc
-    if cache_mode() == "s3":
-        _configure_s3(con)
-    else:
-        # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
-        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。源文件目录也要
-        # 显式加进来：`read_xlsx` 由 DuckDB 自己读文件，不是 Python 读的。
-        dirs = [_derived_dir(), *extra_dirs]
-        allowed = ", ".join(_literal(path.resolve().as_posix()) for path in dirs)
-        con.execute(f"SET allowed_directories = [{allowed}]")
-        con.execute("SET enable_external_access = false")
+    # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
+    # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。源文件目录也要
+    # 显式加进来：`read_xlsx` 由 DuckDB 自己读文件，不是 Python 读的。
+    dirs = [_derived_dir(), *extra_dirs]
+    allowed = ", ".join(_literal(path.resolve().as_posix()) for path in dirs)
+    con.execute(f"SET allowed_directories = [{allowed}]")
+    con.execute("SET enable_external_access = false")
     con.execute("SET lock_configuration = true")
     return con
-
-
-def _configure_s3(con: Any) -> None:
-    """让 DuckDB 直接读对象存储，凭证与 boto3 共用一份。
-
-    SeaweedFS/MinIO 一律 path style（``bucket.endpoint`` 解析不了，和 boto3 那边同一个
-    理由）。httpfs 扩展首次用会自动下载，内网需预置。
-    """
-    endpoint = str(config.get("s3.endpoint") or "").strip()
-    if not endpoint:
-        return
-    parsed = urlsplit(endpoint if "//" in endpoint else f"https://{endpoint}")
-    con.execute(f"SET s3_endpoint = {_literal(parsed.netloc or parsed.path)}")
-    con.execute(f"SET s3_use_ssl = {'true' if parsed.scheme == 'https' else 'false'}")
-    con.execute("SET s3_url_style = 'path'")
-    con.execute(f"SET s3_region = {_literal(str(config.get('s3.region') or '').strip() or 'us-east-1')}")
-    access_key, secret_key = blobs.credentials()
-    con.execute(f"SET s3_access_key_id = {_literal(access_key)}")
-    con.execute(f"SET s3_secret_access_key = {_literal(secret_key)}")
 
 
 class _Sheet(NamedTuple):
@@ -453,12 +405,6 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
         "rows": sum(s["rows"] for s in sheets),
         "built_at": int(time.time()),
     }
-    # s3 模式先把远端写完整、再落本地清单：中途崩掉时本地清单不会指向不存在的远端对象
-    if cache_mode() == "s3":
-        for sheet in sheets:
-            source_file = store_path(sha256, sheet["name"], header)
-            blobs.put_bytes(remote_key(sha256, sheet["name"], header), source_file.read_bytes())
-        blobs.put_bytes(_remote_manifest_key(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
     store.write_atomic(_manifest_path(sha256, header), json.dumps(manifest, ensure_ascii=False).encode())
     _enforce_size_limit()
     return manifest
@@ -480,52 +426,7 @@ def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
             shutil.rmtree(path.parent, ignore_errors=True)
             return None
         return manifest
-    if cache_mode() != "s3":
-        return None
-    raw = blobs.get_or_none(_remote_manifest_key(sha256, header))
-    if raw is None:
-        return None
-    try:
-        manifest = json.loads(raw.decode("utf-8"))
-    except ValueError:
-        return None
-    store.write_atomic(path, raw)
-    return manifest
-
-
-def prune_remote(older_than_days: float, *, dry_run: bool = False) -> tuple[int, int]:
-    """清掉对象存储里过期的派生缓存，返回 `(对象数, 字节数)`。
-
-    派生文件是内容寻址、可重建的：删了只会让下次查询多解析一次，不会丢数据 ——
-    所以能用"多久没被重写"当 TTL，不用像 uploads 那样对着台账留活。
-    """
-    prefix = str(config.get("xlsx.cache_prefix")).strip("/") + "/"
-    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
-    s3 = blobs.client()
-    bucket = blobs.bucket()
-    victims: list[str] = []
-    total = 0
-    token: str | None = None
-    while True:
-        kw: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
-        if token:
-            kw["ContinuationToken"] = token
-        page = s3.list_objects_v2(**kw)
-        for obj in page.get("Contents", []):
-            if obj.get("LastModified") and obj["LastModified"] < cutoff:
-                victims.append(obj["Key"])
-                total += int(obj.get("Size") or 0)
-        if not page.get("IsTruncated"):
-            break
-        token = page.get("NextContinuationToken")
-    if not dry_run:
-        for key in victims:
-            blobs.delete(key)
-            # 本地清单可能还在（清单本地优先命中）：一起清掉，否则查询会一直指向已删的远端对象
-            tail = key[len(prefix) :].split("/")
-            if len(tail) >= 2 and len(tail[0]) == 64:
-                shutil.rmtree(_derived_dir() / tail[0], ignore_errors=True)
-    return len(victims), total
+    return None
 
 
 def _parquet_missing(manifest: dict[str, Any], sha256: str, header: int) -> bool:
@@ -564,14 +465,8 @@ def _enforce_size_limit() -> None:
 # ---------- 取本地 parquet ----------
 
 
-def local_parquet(sha256: str, sheet: str, header: int = 0) -> Path | str | None:
-    """派生 parquet 的读取位置：`s3` 模式给 `s3://` 地址，本地模式给本机路径。
-
-    s3 模式不再拉回本地——多主机共享同一份对象，不必预置/同步缓存目录（也顺带
-    去掉了「本地副本比远端旧」的问题）；本地那份只是建缓存时的副产物。
-    """
-    if cache_mode() == "s3":
-        return f"s3://{blobs.bucket()}/{remote_key(sha256, sheet, header)}"
+def local_parquet(sha256: str, sheet: str, header: int = 0) -> Path | None:
+    """派生 parquet 的本机路径；没建过返回 None。"""
     path = store_path(sha256, sheet, header)
     return path if path.is_file() else None
 

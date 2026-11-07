@@ -349,9 +349,7 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 | `xlsx.max_blob_mb_per_user` | `2048` | `MAX_BLOB_MB_PER_USER` | 每用户二进制总量（当前无入口） |
 | `xlsx.cache_dir` | `.cache/xlsx` | `XLSX_CACHE_DIR` | 索引的本机缓存（必须在 OKF 根之外） |
 | `xlsx.query_budget_ms` | `5000` | `XLSX_QUERY_BUDGET_MS` | 单次 `where` 查询的 CPU 预算，超了 `interrupt()` |
-| `xlsx.sql_policy` | `strict` | `XLSX_SQL_POLICY` | `where` 谓词校验：`strict` 走语法树白名单（默认）/ `free` 只拦多条语句与注释（s3 模式下能读到凭证可达的任意对象） |
-| `xlsx.cache_mode` | `local` | `XLSX_CACHE_MODE` | 派生缓存介质：`local` 只落本机 / `s3` 把派生对象写到对象存储并**直读**（多实例无需本地缓存；未配对象存储时自动退回 `local`） |
-| `xlsx.cache_prefix` | `xlsx-derived` | `XLSX_CACHE_PREFIX` | `cache_mode=s3` 时的对象前缀；派生对象按内容哈希命名，可随时清 |
+| `xlsx.sql_policy` | `strict` | `XLSX_SQL_POLICY` | `where` 谓词校验：`strict` 走语法树白名单（默认）/ `free` 只拦多条语句与注释（本地模式下外部访问已关闭） |
 | `xlsx.cache_local_max_mb` | `2048` | `XLSX_CACHE_LOCAL_MAX_MB` | 本机派生缓存预算，超了按最久未改动淘汰 |
 
 解析 xlsx 用的是 DuckDB 的 `excel` 扩展（`read_xlsx`）。首次启动会自动 `LOAD`，
@@ -364,7 +362,7 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `s3.endpoint` | 空 | `S3_ENDPOINT` | 空 = 对象存储未启用；`okf.backend: s3` 只能改成 `local` |
+| `s3.endpoint` | 空 | `S3_ENDPOINT` | 只有 `scripts/okf_push_s3.py` 会用到；留空不影响任何功能 |
 | `s3.bucket` | `aegra-blobs` | `S3_BUCKET` | 桶名，启动时自动创建（幂等） |
 | `s3.region` | `us-east-1` | `S3_REGION` | 任意值（SeaweedFS 不校验） |
 
@@ -374,10 +372,8 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `okf.backend` | `local` | `OKF_BACKEND` | `local` 直接读 `graphs/<okf.dir>`；`s3` 读本地镜像 |
 | `okf.dir` | `okf` | `OKF_DIR` | 空间根目录名（相对 `graphs/`） |
-| `okf.mirror_dir` | `.cache/okf` | `OKF_MIRROR_DIR` | `s3` 模式的镜像目录 |
-| `okf.mirror_ttl_seconds` | `0` | `OKF_MIRROR_TTL_SECONDS` | 镜像过期重拉的间隔；`0` = 只拉一次（改内容后手动跑 `scripts/okf_pull_s3.py`） |
+| `uploads.dir` | `data/uploads` | `UPLOADS_DIR` | 上传字节落盘位置；按 `<owner>/<thread>/` 隔离 |
 
 #### 图（`graphs/supervisor.py`）
 

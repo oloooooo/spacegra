@@ -29,12 +29,25 @@ router = APIRouter(prefix="/custom", tags=["/custom"])
 
 
 async def _authorize_thread(session: AsyncSession, thread_id: str, user: User) -> None:
-    """上传只能写自己（或服务身份）的会话；不认识的线程直接 404。"""
+    """上传只能写自己（或服务身份）的会话；不认识的线程 404，正在跑的会话 409。
+
+    为什么必须先看 `status`：上传会 `SELECT thread ... FOR UPDATE`（配额与并发写），
+    而发消息时 `run_preparation` 要 `UPDATE thread` 置 `busy`——两者会互相等。让上传
+    排到 run 后面，比让一条消息插进上传中间更容易解释。
+    """
     owner = await session.scalar(select(ThreadORM.user_id).where(ThreadORM.thread_id == thread_id))
     if owner is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     if owner != user.identity:
         raise HTTPException(status_code=403, detail="无权向该会话上传文件")
+    active = await session.scalar(
+        select(ThreadORM.thread_id).where(
+            ThreadORM.thread_id == thread_id,
+            ThreadORM.status.in_(("pending", "running")),
+        )
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="会话正在运行，请等这一轮结束后再上传")
 
 
 @router.post("/uploads", status_code=201)

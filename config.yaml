@@ -47,14 +47,14 @@ xlsx:
   # s3 模式下就能读到凭证可达的任意对象，只在完全可信的环境里改。
   sql_policy: strict
   # 表第一次被查时按 sheet 转成 Parquet（内容哈希 + header 决定目录），之后走 DuckDB。
-  cache_mode: local             # local = 只落本机；s3 = 写对象存储且查询直读（多实例无需本地缓存目录）
-  cache_prefix: xlsx-derived    # cache_mode=s3 时的对象前缀（内容寻址，可随时清）
-  cache_local_max_mb: 2048      # 本机派生缓存的总预算（s3 模式下本地那份只是建缓存时的副产物）
+  # 派生文件只落本机缓存目录；要跨实例共享缓存请换 mirage-s3 分支。
+  cache_local_max_mb: 2048      # 本机派生缓存的总预算（超了按最久未改动整组淘汰）
 
 # --- 对象存储（shared/session/blobs.py，ADR-0016）---
 # 凭证**不在这里**，写 .env：S3_ACCESS_KEY / S3_SECRET_KEY（密钥不进 git）。
 s3:
-  # 空 = 不启用对象存储（okf.backend 只能填 local）。
+  # 空 = 不启用对象存储。本地线的上传、派生缓存、知识读取都只走本机磁盘；
+  # 这里只有 scripts/okf_push_s3.py 会用到（把 knowledge/ 同步给其他产品线）。
   endpoint: ""
   bucket: aegra-blobs
   region: us-east-1
@@ -74,23 +74,15 @@ s3:
   #   最小权限：HeadBucket / CreateBucket / PutObject / GetObject / DeleteObject /
   #            ListBucket / AbortMultipartUpload / ListMultipartUploads
   #
-  # 只想开关：把 endpoint 改回 "" 即退回纯磁盘（已上传的大表仍留在 S3，不影响读旧数据）。
-
-# --- Mirage 虚拟文件系统（graphs/access/mirage_backend.py，ADR-0018）---
-# 开启方式：okf.backend: s3fs（此时 knowledge/ 不再被读，空间知识与上传文件都从对象存储走）。
-mirage:
-  # 审计/索引缓存用的 Redis；空 = 只用进程内缓存（单机开发）。
-  redis_url: redis://127.0.0.1:6379/0
-  cache_limit: 256MB            # Mirage 缓存上限（Redis 或进程内）
-  index_ttl_seconds: 600        # 目录索引的 TTL；对象被外部改动时最多这么久后自愈
+  # 本地线不依赖对象存储：endpoint 留空即可完整运行。
 
 # --- 空间知识（shared/knowledge/root.py，ADR-0016）---
 okf:
-  backend: local                # local = 直接读仓库根 <dir>；s3 = 拉 S3 本地镜像（旧路径）；
-                                # s3fs = Mirage 直读对象存储（ADR-0018，上传功能只在这个模式全开）
   dir: knowledge                # 空间根目录名（相对仓库根；数据不在代码包里）
-  mirror_dir: .cache/okf        # s3 模式的镜像目录
-  mirror_ttl_seconds: 0         # 0 = 只拉一次；改内容后跑 scripts/okf_pull_s3.py
+
+# --- 上传字节（shared/session/uploads.py，ADR-0018 §9）---
+uploads:
+  dir: data/uploads             # 放在 okf.dir 之外（知识目录只放 md）
 
 # --- 图（graphs/supervisor.py）---
 agents:

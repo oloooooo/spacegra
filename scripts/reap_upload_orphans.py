@@ -1,15 +1,14 @@
-"""清掉没有台账行的上传对象（ADR-0018）。
+"""清掉没有台账行的上传文件（ADR-0018）。
 
-删会话时 `session_object` 行靠外键 CASCADE 跟着删（迁移 `b8c9d0e1f2a3`），
-对象存储里的字节不会 —— 这个脚本负责扫 `uploads/<owner>/<thread>/` 前缀，
-把"台账里已经没有这个会话"且对象**够老**（默认 24h，避开上传写对象与写行之间的窗口）
-的字节删掉。
+删会话时 `session_object` 行靠外键 CASCADE 跟着删（迁移 `b8c9d0e1f2a3`），本地盘上的
+字节不会 —— 这个脚本扫 `data/uploads/<owner>/<thread>/`，把"台账里已经没有这个会话"
+且文件**够老**（默认 24h，避开上传写字节与写行之间的窗口）的目录删掉。
 
-    PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --dry-run      # 只看（默认）
-    PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --apply        # 真删
+    PYTHONPATH=. uv run python scripts/reap_upload_orphans.py              # 只看（默认）
+    PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --apply      # 真删
     PYTHONPATH=. uv run python scripts/reap_upload_orphans.py --apply --older-than-hours 6
 
-没有台账行的前缀**不一定**是孤儿：可能上传崩在"对象已写、行未落"之间。
+没有台账行的目录**不一定**是孤儿：可能上传崩在"字节已写、行未落"之间。
 所以默认 24h，宁可留一会儿也不删刚写进来的东西。
 """
 
@@ -18,13 +17,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 
 from custom.db.models import SessionObject
-from shared.session import blobs
+from shared.session import uploads
 
 
 @dataclass
@@ -38,32 +39,47 @@ class Report:
     orphan_bytes: int = 0
 
 
-def _iter_prefixes(max_keys: int = 100_000) -> dict[str, list[dict]]:
-    """列出 `uploads/` 下按 `owner/thread/` 聚合的对象（key -> 对象元数据）。"""
-    s3 = blobs.client()
-    bucket = blobs.bucket()
+def _iter_prefixes() -> dict[str, list[dict]]:
+    """按 `owner/thread/` 聚合的上传文件（用 mtime 当"新鲜度"）。"""
     out: dict[str, list[dict]] = defaultdict(list)
-    token: str | None = None
-    seen = 0
-    while True:
-        kw = {"Bucket": bucket, "Prefix": "uploads/", "MaxKeys": 1000}
-        if token:
-            kw["ContinuationToken"] = token
-        page = s3.list_objects_v2(**kw)
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            parts = key.split("/")
-            if len(parts) < 4:  # uploads/<owner>/<thread>/<name>
-                continue
-            out[f"{parts[0]}/{parts[1]}/{parts[2]}/"].append(obj)
-        seen += len(page.get("Contents", []))
-        if seen >= max_keys or not page.get("IsTruncated"):
-            return out
-        token = page.get("NextContinuationToken")
+    for owner, thread, _name, path in uploads.iter_local_keys():
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        out[f"{owner}/{thread}/"].append(
+            {
+                "Key": f"{owner}/{thread}/{path.name}",
+                "Size": st.st_size,
+                "LastModified": datetime.fromtimestamp(st.st_mtime, UTC),
+            }
+        )
+    return out
 
 
-async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
-    """算出该删哪些前缀（不删任何东西）。"""
+def _live_prefixes(rows: Iterable[Any]) -> set[str]:
+    """台账里的活跃前缀（`<owner>/<thread>/`）。"""
+    return {f"{row[0]}/{row[1]}/" for row in rows}
+
+
+def _orphans(live: set[str], cutoff: datetime) -> tuple[list[str], int, int]:
+    """该删的前缀 → `(前缀列表, 文件数, 字节数)`。"""
+    prefixes: list[str] = []
+    objects = 0
+    size = 0
+    for prefix, files in _iter_prefixes().items():
+        if prefix in live:
+            continue
+        if any(f["LastModified"] >= cutoff for f in files):
+            continue  # 可能有上传正在写，这一轮不动它
+        prefixes.append(prefix)
+        objects += len(files)
+        size += sum(int(f["Size"] or 0) for f in files)
+    return prefixes, objects, size
+
+
+async def plan(older_than: timedelta) -> Report:
+    """算出该删哪些目录（不删任何东西）。"""
     from aegra_api.core.database import db_manager
     from aegra_api.core.orm import get_session_maker
     from aegra_api.settings import settings
@@ -74,61 +90,48 @@ async def plan(older_than: timedelta, *, max_keys: int = 100_000) -> Report:
 
         db_manager.engine = create_async_engine(settings.db.database_url, pool_size=2, pool_pre_ping=True)
 
-    prefixes = _iter_prefixes(max_keys)
+    prefixes = _iter_prefixes()
     report = Report(scanned_prefixes=len(prefixes))
     cutoff = datetime.now(UTC) - older_than
 
     maker = get_session_maker()
     async with maker() as session:
         rows = (await session.execute(select(SessionObject.owner_identity, SessionObject.thread_id))).all()
-    # 前缀形状必须与 `_iter_prefixes()` 的聚合方式一致（`uploads/<owner>/<thread>/`），
-    # 少了 `uploads/` 这一段就永远不命中，所有对象都会被当孤儿删掉（#4）。
-    live = {blobs.upload_prefix(owner, thread) for owner, thread in rows}
+    live = _live_prefixes(rows)
+    report.live_prefixes = len(live & set(prefixes))
 
-    for prefix, objects in prefixes.items():
-        if prefix in live:
-            report.live_prefixes += 1
-            continue
-        fresh = [o for o in objects if o.get("LastModified") and o["LastModified"] >= cutoff]
-        if fresh:
-            continue  # 可能有上传正在写，这一轮不动它
-        report.orphan_prefixes.append(prefix)
-        report.orphan_objects += len(objects)
-        report.orphan_bytes += sum(int(o.get("Size") or 0) for o in objects)
+    orphans, objects, size = _orphans(live, cutoff)
+    report.orphan_prefixes = orphans
+    report.orphan_objects = objects
+    report.orphan_bytes = size
     return report
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="清掉没有台账行的上传对象")
+    ap = argparse.ArgumentParser(description="清掉没有台账行的上传文件")
     ap.add_argument("--apply", action="store_true", help="真的删（默认只 dry-run）")
     ap.add_argument("--older-than-hours", type=float, default=24.0)
-    ap.add_argument(
-        "--xlsx-cache-days",
-        type=float,
-        default=0.0,
-        help="同时清掉对象存储里超过 N 天的 xlsx 派生缓存（默认 0 = 不清）",
-    )
     args = ap.parse_args()
 
     report = asyncio.run(plan(timedelta(hours=args.older_than_hours)))
     print(
-        f"扫描前缀 {report.scanned_prefixes}，活跃 {report.live_prefixes}，"
-        f"孤儿 {len(report.orphan_prefixes)} 个（{report.orphan_objects} 个对象，"
+        f"扫描目录 {report.scanned_prefixes}，活跃 {report.live_prefixes}，"
+        f"孤儿 {len(report.orphan_prefixes)} 个（{report.orphan_objects} 个文件，"
         f"{report.orphan_bytes / 1024 / 1024:.1f}MB）"
     )
     for prefix in report.orphan_prefixes[:20]:
         print("  孤儿:", prefix)
-    if args.xlsx_cache_days > 0:
-        from graphs.tools.xlsx import duck
-
-        objects, size = duck.prune_remote(args.xlsx_cache_days, dry_run=not args.apply)
-        print(f"xlsx 派生缓存：{objects} 个对象（{size / 1024 / 1024:.1f}MB）")
     if not args.apply:
         print("dry-run：加 --apply 才会真删")
         return
     for prefix in report.orphan_prefixes:
-        deleted = blobs.delete_prefix(prefix)
-        print(f"  已删 {prefix} → {deleted} 个对象")
+        owner, thread = prefix.rstrip("/").split("/")[:2]
+        try:
+            uploads.delete_thread(owner, thread)
+        except ValueError as e:  # 遗留的非法目录名：跳过，其他目录照删
+            print(f"  跳过 {prefix}（{e}）")
+            continue
+        print(f"  已删 {prefix}")
 
 
 if __name__ == "__main__":
