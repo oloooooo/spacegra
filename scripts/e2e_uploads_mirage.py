@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aegra_api.settings import settings
 from custom.service import uploads
-from graphs.access.mirage_backend import build_workspace, for_agent
+from graphs.access.mirage_backend import build_workspace, close_all_workspaces, for_agent
 from scripts.reap_upload_orphans import plan
 from shared.session import blobs
 from shared.session.upload_rule import MAIN_AGENT, XLSX_AGENT
@@ -152,6 +152,8 @@ async def main() -> int:
 
     await _reset(maker)
     await engine.dispose()
+    # 共用 S3 客户端是进程级的，脚本退出前关掉，否则 aiohttp 会刷 Unclosed client session
+    await close_all_workspaces()
     print(f"\n{'全部通过' if not failures else f'{len(failures)} 项失败: {failures}'}")
     return 0 if not failures else 1
 
