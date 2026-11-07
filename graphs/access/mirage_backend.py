@@ -163,7 +163,6 @@ def build_workspace(*, owner: str, thread_id: str, agents: Mapping[str, Collecti
     """
     if not owner or not thread_id:
         raise ValueError("owner 与 thread_id 都不能为空：它们是上传目录的隔离键")
-    uploads.validate()  # s3fs 只看得见对象存储里的 uploads/，介质配错就抬错（ADR-0018 §9）
 
     scope = f"{identity_digest(owner)}-{thread_id}"
     mounts = {

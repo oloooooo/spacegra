@@ -72,3 +72,90 @@ class TestReservedNames:
     @pytest.mark.parametrize("name", ["console.txt", "tmp-a.xlsx", "commander.md", "备份.bak"])
     def test_similar_names_still_pass(self, name: str) -> None:
         assert uploads.safe_name(name) == name
+
+
+class _FakeStore:
+    """内存版对象存储：够 `save_upload` 走一遍备份/覆盖/回滚。"""
+
+    def __init__(self, objects: dict[str, bytes] | None = None) -> None:
+        self.objects = dict(objects or {})
+        self.fail_commit = False
+
+    def stat(self, key: str) -> dict | None:
+        return {"Key": key} if key in self.objects else None
+
+    def copy(self, src: str, dst: str) -> None:
+        self.objects[dst] = self.objects[src]
+
+    def delete(self, key: str) -> None:
+        self.objects.pop(key, None)
+
+    def put_stream(self, src, key, *, max_bytes: int) -> tuple[str, int]:
+        data = src.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise uploads.blobs.BlobTooLarge(max_bytes)
+        self.objects[key] = data
+        return ("sha-new", len(data))
+
+
+class _FakeSession:
+    def __init__(self, *, fail_commit: bool) -> None:
+        self.fail_commit = fail_commit
+        self.commits = 0
+        self.executed: list[str] = []
+
+    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.executed.append(str(stmt))
+
+    async def scalar(self, stmt):  # noqa: ANN001, ANN201 - 同名文件已存在
+        return "old-sha"
+
+    async def commit(self) -> None:
+        if self.fail_commit:
+            raise RuntimeError("db down")
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        return None
+
+
+def _wire(monkeypatch: pytest.MonkeyPatch, store: _FakeStore) -> None:
+    for name in ("stat", "copy", "delete", "put_stream"):
+        monkeypatch.setattr(uploads.blobs, name, getattr(store, name))
+    monkeypatch.setattr(
+        uploads.config,
+        "get",
+        lambda key: {"session_files.max_files_per_session": 50, "session_files.max_upload_mb": 5}[key],
+    )
+
+
+class TestOverwriteRollback:
+    """#7：覆盖上传失败时旧字节必须回来，成功时备份要清掉。"""
+
+    async def test_failed_commit_restores_old_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = _FakeStore({"uploads/u1/t1/a.md": b"old"})
+        _wire(monkeypatch, store)
+
+        with pytest.raises(RuntimeError):
+            await uploads.save_upload(
+                _FakeSession(fail_commit=True),
+                owner="u1",
+                thread_id="t1",
+                name="a.md",
+                src=__import__("io").BytesIO(b"new"),
+                spaces=[],
+            )
+
+        assert store.objects == {"uploads/u1/t1/a.md": b"old"}
+
+    async def test_success_drops_backup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = _FakeStore({"uploads/u1/t1/a.md": b"old"})
+        _wire(monkeypatch, store)
+        session = _FakeSession(fail_commit=False)
+
+        await uploads.save_upload(
+            session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"new"), spaces=[]
+        )
+
+        assert store.objects == {"uploads/u1/t1/a.md": b"new"}
+        assert session.commits == 1

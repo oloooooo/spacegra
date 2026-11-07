@@ -8,6 +8,7 @@ from custom.api.graphs import router as graphs_router
 from custom.api.spaces import router as spaces_router
 from custom.api.tasks import router as tasks_router
 from custom.api.uploads import router as uploads_router
+from custom.middleware.body_limit import UploadBodyLimit
 from custom.service.outbox_dispatcher import dispatcher as outbox_dispatcher
 from shared import lifecycle
 
@@ -28,6 +29,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# 上传体积在 ASGI 层拦：Starlette 会把 multipart 整个读完才进 handler（#8）。
+app.add_middleware(UploadBodyLimit)
 
 app.include_router(account_router)
 app.include_router(spaces_router)

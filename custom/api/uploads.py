@@ -44,7 +44,7 @@ async def upload_file(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_auth)],
 ) -> dict:
-    """上传一个文件到当前会话；返回它落到了哪个 agent。"""
+    """上传一个文件到当前会话；返回它落到了哪个 agent（事务由 `save_upload` 自己提交）。"""
     await _authorize_thread(session, str(thread_id), user)
     spaces = await UserSpaceRepository(session).list_by_user(user.identity)
     try:
@@ -60,8 +60,6 @@ async def upload_file(
         await session.rollback()
         raise HTTPException(status_code=e.status_code, detail=e.message) from e
     except ValueError as e:
-        # thread_id 拼不进上传路径（含分隔符/保留字符）：4xx，不是 500。
         await session.rollback()
-        raise HTTPException(status_code=422, detail=f"当前会话不能存放上传文件：{e}") from e
-    await session.commit()
+        raise HTTPException(status_code=422, detail=f"上传参数不合法：{e}") from e
     return result

@@ -1,4 +1,4 @@
-"""上传：字节进对象存储，元数据进 `session_object`（ADR-0018）。
+"""上传：字节进对象存储，元数据进 `session_object`（ADR-0018）。**本函数自己 commit**。
 
 两本账的分工：对象存储是真相（key = ``uploads/<owner>/<thread>/<文件名>``），
 `session_object` 行回答"这个会话里有哪些文件、该派给谁"。**读路径不查这张表**
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from typing import Any, BinaryIO
 
 import structlog
@@ -121,6 +122,21 @@ async def save_upload(
     if existing is None and await count_files(session, owner, thread_id) >= max_files:
         raise UploadError(f"每个会话最多 {max_files} 个上传文件", 409)
 
+    # 覆盖同名文件会把旧字节冲掉：先复制一份备份，落库/提交失败再换回来（#7）。
+    backup: str | None = None
+    if await asyncio.to_thread(blobs.stat, key) is not None:
+        backup = f"{blobs.upload_prefix(owner, thread_id)}.bak-{uuid.uuid4().hex}"
+        # 备份失败就直接抛：没有旧字节的副本，覆盖是不安全的。
+        await asyncio.to_thread(blobs.copy, key, backup)
+
+    async def _revert() -> None:
+        with contextlib.suppress(Exception):
+            if backup is None:
+                await asyncio.to_thread(blobs.delete, key)
+            else:
+                await asyncio.to_thread(blobs.copy, backup, key)
+                await asyncio.to_thread(blobs.delete, backup)
+
     try:
         sha256, size = await asyncio.to_thread(blobs.put_stream, src, key, max_bytes=limit)
     except blobs.BlobTooLarge as e:
@@ -154,11 +170,13 @@ async def save_upload(
     )
     try:
         await session.execute(stmt)
+        await session.commit()
     except BaseException:
-        # 台账写不进去就不要留孤儿字节（同名覆盖已经把旧字节冲掉了，留着只会更乱）
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(blobs.delete, key)
+        await _revert()
         raise
+    if backup is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(blobs.delete, backup)
 
     logger.info(
         "upload_saved",
