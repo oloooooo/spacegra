@@ -80,6 +80,8 @@ _ALLOWED_NODES = frozenset(
         "COLUMN_REF",
         "STAR",
         "VALUE_CONSTANT",
+        "CASE_EXPR",
+        "COLLATE",
         "COMPARE_EQUAL",
         "COMPARE_NOTEQUAL",
         "COMPARE_LESSTHAN",
@@ -127,8 +129,19 @@ _ALLOWED_FUNCTIONS = frozenset(
         "substring",
         "strftime",
         "date_trunc",
+        # `extract(...)` 在这棵语法树里就是 `date_part(...)`
+        "date_part",
+        "starts_with",
+        "ends_with",
+        "strpos",
+        "regexp_matches",
+        "nullif",
+        "greatest",
+        "least",
     }
 )
+# 字符串字面量先屏蔽再查文本闸门：`备注 = 'a--b'`、`'select * from x'` 是数据不是 SQL
+_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'|\$\$.*?\$\$", re.DOTALL)
 
 
 # ---------- 配置与路径 ----------
@@ -605,9 +618,11 @@ def _check_where(where: str) -> str:
     """`where` 是模型写的 SQL 谓词：禁掉多语句、注释与 DDL/扩展加载。
 
     注释符必禁：``1=1 --`` 会把后面的 ``LIMIT/OFFSET`` 一并注释掉。
+    字符串字面量先屏蔽再查——`备注 LIKE '%--%'` 里的 `--` 是数据，不该被当成注释（#17）。
     """
     text = where.strip().rstrip(";").strip()
-    if ";" in text or "--" in text or "/*" in text or _FORBIDDEN_SQL.search(text):
+    bare = _STRING_LITERAL.sub(lambda m: "_" * len(m.group()), text)
+    if ";" in bare or "--" in bare or "/*" in bare or _FORBIDDEN_SQL.search(bare):
         raise ValueError("where 只能是筛选谓词，不能包含分号、注释或 DDL/多条语句")
     return text
 

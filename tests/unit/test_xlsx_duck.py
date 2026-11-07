@@ -90,6 +90,19 @@ def parsed(tmp_path: Path, monkeypatch):
         "NOT a = 1",
         "strftime(a, '%Y') = '2024'",
         "coalesce(a, 0) > 1",
+        # #17：常见的分析谓词不该被白名单误伤
+        "CASE WHEN a > 1 THEN '大' ELSE '小' END = '大'",
+        "extract(year from 日期) = 2024",
+        "starts_with(客户, '甲')",
+        "ends_with(客户, '公司')",
+        "nullif(金额, 0) > 1",
+        "greatest(a, b) > 1",
+        "strpos(客户, '甲') > 0",
+        "regexp_matches(客户, '^甲')",
+        # 字面量里的 -- / ; / 关键字是数据，不是注释或语句（#17）
+        "备注 = 'a--b'",
+        "备注 = 'select * from x'",
+        "备注 = 'x;y'",
     ],
 )
 def test_check_predicate_allows_plain_predicates(parsed, where: str) -> None:

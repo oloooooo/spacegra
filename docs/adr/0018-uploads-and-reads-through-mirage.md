@@ -133,11 +133,12 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    Windows 上 `os.replace` 并发替换同一目标还会回 `PermissionError`，所以"对方已写完就
    接受"。清单（`manifest.json`）最后写，看到清单就说明 parquet 齐全。
 4. **闸门不放松**：`where` 仍是模型写的 SQL 谓词。两道：`_check_where` 先禁分号、注释与
-   `read_*`/`glob`/`attach` 这类名字；`_check_predicate` 再让 DuckDB 把谓词解析成语法树，
-   按节点白名单放行（列引用、字面量、比较/逻辑运算、少数函数），**子查询、表函数、
-   陌生函数一律拒**。`local` 模式另外关掉 `enable_external_access` 并把 `allowed_directories`
-   限定到派生目录；`s3` 模式要直读对象存储，外部访问必须开着，此时注入面全压在语法树
-   白名单上（ADR-0018 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
+   `read_*`/`glob`/`attach` 这类名字（字符串字面量先屏蔽，`备注 = 'a--b'` 这种是数据不是注释）；
+   `_check_predicate` 再让 DuckDB 把谓词解析成语法树，按节点白名单放行（列引用、字面量、
+   `CASE`、比较/逻辑运算、少数纯函数如 `date_part`/`starts_with`/`nullif`），**子查询、
+   表函数、陌生函数一律拒**。`local` 模式另外关掉 `enable_external_access` 并把
+   `allowed_directories` 限定到派生目录；`s3` 模式要直读对象存储，外部访问必须开着，此时注入面
+   全压在语法树白名单上（ADR-0018 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
    DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这两层。
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
