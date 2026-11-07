@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 from typing import Any, BinaryIO
 
 import structlog
@@ -84,12 +83,6 @@ async def count_files(session: AsyncSession, owner: str, thread_id: str) -> int:
     )
 
 
-def _lock_key(owner: str, thread_id: str, name: str) -> int:
-    """同名上传的咨询锁键：blake2b 取 8 字节（PG 的 `bigint`，带符号）。"""
-    raw = f"{owner}\x00{thread_id}\x00{name}".encode()
-    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big", signed=True)
-
-
 async def save_upload(
     session: AsyncSession,
     *,
@@ -107,12 +100,16 @@ async def save_upload(
     name = safe_name(name)
     limit = size_limit(name)
 
-    # 同名并发上传必须串行：备份→覆盖→落库三步之间没有隔离，两个请求会互相冲掉备份，
-    # 最后一个赢、另一个的字节凭空消失（#16）。事务级咨询锁在 commit/rollback 时自动释放。
-    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _lock_key(owner, thread_id, name)})
+    # 会话级互斥：锁住 thread 行，直到本事务 commit。
+    # ① 同一会话的上传串行，配额计数才准（#13）；② run 创建路径里 set_thread_status
+    # 的 UPDATE 会在这把行锁上排队 —— 也就是说"发消息"不会插进上传的中间。
+    await session.execute(
+        text("SELECT thread_id FROM thread WHERE thread_id = :thread_id FOR UPDATE"),
+        {"thread_id": thread_id},
+    )
 
-    # 配额：先数后插不是原子的，不同名的并发请求仍可能超出 1~2 个。
-    # 这是软限制（真正挡人的是单文件大小），不值得为此加行锁。
+    # 配额：计数与插入现在都在上面那把行锁里，同一会话不会并发越过上限。
+    # 跨会话不共享配额，所以不需要再收窄。
     max_files = int(config.get("session_files.max_files_per_session"))
     existing = await session.scalar(
         select(SessionObject.sha256).where(
@@ -169,6 +166,8 @@ async def save_upload(
                 "object_key": key,
                 "sha256": sha256,
                 "size_bytes": size,
+                # Core upsert 不会触发 `onupdate=func.now()`，必须显式写（#13）
+                "updated_at": func.now(),
             },
         )
         await session.execute(stmt)

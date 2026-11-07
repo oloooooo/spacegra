@@ -168,24 +168,18 @@ class TestSaveUploadGuards:
 
 
 class TestSameNameSerialization:
-    """同名并发上传要先拿咨询锁，否则备份/覆盖会互相冲掉（issue #16）。"""
+    """同一会话的上传要排队：锁 thread 行，也把"发消息"挡在上传之后（issue #13/#16）。"""
 
-    def test_lock_key_is_stable_and_distinct(self) -> None:
-        a = uploads_service._lock_key("u1", "t1", "a.md")
-        assert a == uploads_service._lock_key("u1", "t1", "a.md")
-        assert a != uploads_service._lock_key("u1", "t1", "b.md")
-        assert a != uploads_service._lock_key("u1", "t2", "a.md")
-        assert -(2**63) <= a < 2**63
-
-    async def test_lock_is_taken_before_any_write(self, fs_store) -> None:
+    async def test_thread_row_is_locked_before_any_write(self, fs_store) -> None:
         session = _QueuedSession("old-sha")
 
         await uploads_service.save_upload(
             session, owner="u1", thread_id="t1", name="a.md", src=__import__("io").BytesIO(b"x"), spaces=[]
         )
 
-        assert "pg_advisory_xact_lock" in session.sql[0]
+        assert "FOR UPDATE" in session.sql[0].upper()
         assert len(session.sql) == 2, "锁之后只应再有一条 upsert"
+        assert "updated_at" in session.sql[1], "覆盖必须刷新 updated_at（#13）"
 
 
 class TestOverwriteRollback:
