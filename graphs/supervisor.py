@@ -76,7 +76,7 @@ _SERVER_URL = config.get("agents.server_url")
 
 def _mirage_mode() -> bool:
     """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
-    return config.get("okf.backend") == "s3fs"
+    return config.backend_mode() == "s3fs"
 
 
 def _visible_spaces(config: RunnableConfig) -> list[str]:

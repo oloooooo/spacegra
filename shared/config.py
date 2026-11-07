@@ -14,6 +14,7 @@ S3_ACCESS_KEY / S3_SECRET_KEY / OPENAI_API_KEY。aegra 原生配置走 `aegra.js
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -109,3 +110,14 @@ def get(key: str) -> Any:
     if raw is None or raw == "":
         return default
     return _coerce(key, raw, default)
+
+
+def backend_mode(source: Mapping[str, Any] | None = None) -> str:
+    """`okf.backend` 归一化（`local` / `s3` / `s3fs`）：去空白、转小写。
+
+    `s3fs` 的判断散在五个调用点，原先有的 `strip().lower()`、有的裸等——配置里写成
+    `S3FS` 或 ` s3fs ` 时会出现"一部分走 Mirage、一部分走本地盘"的半套路由（issue #12）。
+    所有比较都走这个函数；传 `source` 可对某个 run 的配置字典做同样的归一化。
+    """
+    raw = get("okf.backend") if source is None else source.get("okf.backend")
+    return str(raw or "").strip().lower()

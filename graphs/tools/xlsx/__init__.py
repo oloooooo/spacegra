@@ -88,7 +88,7 @@ def _check_scope(path: str | Path, config: object) -> None:
 
 def _mirage_mode() -> bool:
     """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
-    return str(app_config.get("okf.backend")).strip().lower() == "s3fs"
+    return app_config.backend_mode() == "s3fs"
 
 
 async def _local_copy(path: str, runtime: ToolRuntime) -> str:

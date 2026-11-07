@@ -110,3 +110,12 @@ def test_uploads_traversal_still_denied(okf, monkeypatch):
     monkeypatch.setattr(xlsx_mod.app_config, "get", lambda key, *a: "s3fs" if key == "okf.backend" else a[0])
     with pytest.raises(ValueError, match="无权访问"):
         xlsx_mod._check_scope("/uploads/../space-b/t.xlsx", _cfg("space-a"))
+
+
+def test_backend_mode_tolerates_case_and_padding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#12：`okf.backend` 的六个判定点统一走 `config.backend_mode()`，别再各自大小写敏感。"""
+    from shared import config as app_config
+
+    monkeypatch.setenv("OKF_BACKEND", " S3FS ")
+    assert app_config.backend_mode() == "s3fs"
+    assert app_config.backend_mode({"okf.backend": "S3fs "}) == "s3fs"
