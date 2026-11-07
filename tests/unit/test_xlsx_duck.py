@@ -40,13 +40,6 @@ def test_store_path_cannot_escape_hash_dir(tmp_path: Path, monkeypatch, sheet: s
     assert len(path.name) <= duck._SHEET_NAME_MAX + len(".parquet")
 
 
-def test_remote_key_has_prefix_and_hash(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_prefix": "xlsx-derived/"}))
-
-    assert duck.remote_key(SHA, "Sheet1") == f"xlsx-derived/{SHA}/h0/Sheet1.parquet"
-    assert duck.remote_key(SHA, "Sheet1", 1) == f"xlsx-derived/{SHA}/h1/Sheet1.parquet"
-
-
 class _StubConfig:
     def __init__(self, values: dict[str, object]) -> None:
         self._values = values
@@ -146,15 +139,6 @@ def test_unknown_policy_falls_back_to_strict(parsed, monkeypatch) -> None:
         duck._check_predicate(parsed, "EXISTS (FROM query('FROM read_' || 'text(''/etc/passwd'')'))")
 
 
-def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
-    """s3 模式直接给 `s3://` 地址：多主机不需要本地缓存目录（ADR-0018 §6）。"""
-    monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
-    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_prefix": "xlsx-derived"}))
-    monkeypatch.setattr(duck.blobs, "bucket", lambda: "bench")
-
-    assert duck.local_parquet(SHA, "Sheet1") == f"s3://bench/xlsx-derived/{SHA}/h0/Sheet1.parquet"
-
-
 def test_ident_escapes_quotes() -> None:
     """列名来自 xlsx 表头，双引号必须翻倍，否则能拼出第二个标识符/谓词。"""
     assert duck._ident('a"b') == '"a""b"'
@@ -218,27 +202,6 @@ def test_connect_reads_only_derived_dir(tmp_path: Path, monkeypatch) -> None:
         con.close()
 
 
-def test_cache_mode_falls_back_to_local_without_s3(monkeypatch) -> None:
-    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_mode": "s3"}))
-    monkeypatch.setattr(duck.blobs, "configured", lambda: False)
-
-    assert duck.cache_mode() == "local"
-
-
-def test_cache_mode_unknown_value_means_local(monkeypatch) -> None:
-    """没有 off 这个值：写错/写旧值一律当 local，不会静默关掉缓存。"""
-    monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_mode": "off"}))
-
-    assert duck.cache_mode() == "local"
-
-
-def test_local_parquet_returns_none_when_absent(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
-    monkeypatch.setattr(duck, "cache_mode", lambda: "local")
-
-    assert duck.local_parquet(SHA, "Sheet1") is None
-
-
 def test_local_parquet_returns_existing_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
     path = tmp_path / "derived" / SHA / "h0" / "Sheet1.parquet"
@@ -300,36 +263,6 @@ def test_build_derived_keeps_columns_with_empty_header(tmp_path: Path, monkeypat
             "bytes": manifest["sheets"][0]["bytes"],
         }
     ]
-
-
-def test_s3_manifest_is_written_last(tmp_path: Path, monkeypatch) -> None:
-    """s3 模式先传远端、再落本地清单：中途失败时本地不能留下指向空对象的清单。"""
-    import duckdb
-    from openpyxl import Workbook
-
-    try:
-        duckdb.connect().execute("LOAD excel")
-    except Exception:  # noqa: BLE001 - 没装 excel 扩展的环境跳过
-        pytest.skip("duckdb excel 扩展未安装")
-    source = tmp_path / "src.xlsx"
-    book = Workbook()
-    book.active.title = "数据"
-    book.active.append(["客户", "金额"])
-    book.active.append(["甲", 100])
-    book.save(source)
-    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
-    monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
-    monkeypatch.setattr(duck.blobs, "bucket", lambda: "bench")
-
-    def boom(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("对象存储不可用")
-
-    monkeypatch.setattr(duck.blobs, "put_bytes", boom)
-
-    with pytest.raises(RuntimeError, match="对象存储不可用"):
-        duck.build_derived(SHA, source, 0)
-
-    assert not duck._manifest_path(SHA, 0).exists()
 
 
 def test_size_limit_drops_whole_cache_group(tmp_path: Path, monkeypatch) -> None:

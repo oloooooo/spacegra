@@ -93,29 +93,18 @@ def test_service_identity_without_forwarded_spaces_denies(okf):
         xlsx_mod._check_scope("/space-a/t.xlsx", cfg)
 
 
-def test_uploads_allowed_in_mirage_mode(okf, monkeypatch):
-    """s3fs 模式：/uploads 是「本会话」的文件，上传时已按会话鉴权，工具层放行。"""
-    monkeypatch.setattr(xlsx_mod.app_config, "get", lambda key, *a: "s3fs" if key == "okf.backend" else a[0])
+def test_uploads_allowed(okf):
+    """`/uploads/<name>` 是本会话的上传目录，上传时已按会话鉴权，工具层放行。"""
     xlsx_mod._check_scope("/uploads/碳排放清单.xlsx", _cfg())
 
 
-def test_uploads_denied_in_local_mode(okf):
-    """本地磁盘模式没有上传目录，/uploads 既不是空间也不是根散文件，一律拒。"""
-    with pytest.raises(ValueError, match="无权访问"):
-        xlsx_mod._check_scope("/uploads/x.xlsx", _cfg("space-a"))
+def test_uploads_nested_path_denied(okf):
+    """只允许一层文件名；多层会被 `..` 藏东西。"""
+    with pytest.raises(ValueError, match="只能是一层"):
+        xlsx_mod._check_scope("/uploads/sub/x.xlsx", _cfg("space-a"))
 
 
-def test_uploads_traversal_still_denied(okf, monkeypatch):
+def test_uploads_traversal_still_denied(okf):
     """放行只看解析后的首段：`/uploads/../space-b/x.xlsx` 真开的是 space-b。"""
-    monkeypatch.setattr(xlsx_mod.app_config, "get", lambda key, *a: "s3fs" if key == "okf.backend" else a[0])
     with pytest.raises(ValueError, match="无权访问"):
         xlsx_mod._check_scope("/uploads/../space-b/t.xlsx", _cfg("space-a"))
-
-
-def test_backend_mode_tolerates_case_and_padding(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#12：`okf.backend` 的六个判定点统一走 `config.backend_mode()`，别再各自大小写敏感。"""
-    from shared import config as app_config
-
-    monkeypatch.setenv("OKF_BACKEND", " S3FS ")
-    assert app_config.backend_mode() == "s3fs"
-    assert app_config.backend_mode({"okf.backend": "S3fs "}) == "s3fs"
