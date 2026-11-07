@@ -217,3 +217,20 @@ class TestOverwriteRollback:
         assert session.commits == 1
         assert uploads.read_bytes("u1", "t1", "a.md") == b"new"
         assert [p.name for p in uploads.local_path("u1", "t1", "a.md").parent.iterdir()] == ["a.md"]
+
+
+class TestReservedNames:
+    """#14：Windows 设备名与本服务的临时文件前缀一律 422。"""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["CON", "con.txt", "NUL.xlsx", "COM1", "lpt9.json", "CON .txt", ".tmp-a.xlsx", ".TMP-a", ".bak-a.xlsx"],
+    )
+    def test_rejected(self, name: str) -> None:
+        with pytest.raises(uploads.UploadError) as e:
+            uploads.safe_name(name)
+        assert e.value.status_code == 422
+
+    @pytest.mark.parametrize("name", ["console.txt", "tmp-a.xlsx", "commander.md", "备份.bak"])
+    def test_similar_names_still_pass(self, name: str) -> None:
+        assert uploads.safe_name(name) == name

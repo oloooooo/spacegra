@@ -40,6 +40,10 @@ logger = structlog.getLogger(__name__)
 
 _MAX_NAME = 200
 
+#: 本服务自己的临时/备份前缀：`.tmp-` 是 `put_stream` 的半个文件，`.bak-` 是覆盖前的旧字节。
+#: 两者都被 `iter_local_keys()` 跳过，同名上传会“隐身”（落盘、能读、reaper 永远看不见）。
+_TEMP_PREFIXES = (".tmp-", ".bak-")
+
 
 class UploadError(Exception):
     """能直接翻成 4xx 的上传错误。"""
@@ -57,6 +61,8 @@ def safe_name(name: str) -> str:
     所以分隔符、`:`（NTFS 数据流）、以点结尾（Windows 静默改写）都不收。
     """
     name = (name or "").strip()
+    if name.lower().startswith(_TEMP_PREFIXES):
+        raise UploadError("文件名不合法：前缀与本服务的临时文件冲突（.tmp- / .bak-），请改名", 422)
     try:
         return safe_segment(name, limit=_MAX_NAME)
     except ValueError as e:
