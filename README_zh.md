@@ -82,7 +82,7 @@ OPENAI_MODEL=deepseek-flash
 quota:
   max_threads_per_user: 50   # 含子线程；一个会话派 3~5 个子任务就吃掉 3~5 个名额
 s3:
-  endpoint: http://127.0.0.1:8333   # 留空 = 不启用对象存储（okf.backend 只能填 local）
+  endpoint: http://127.0.0.1:8333   # 留空 = 不启用对象存储：上传返回 503，okf.backend 只能是 local
 ```
 
 > `PASSWORD_PEPPER` 一旦改动，**已注册的账号全部无法登录**（bcrypt 哈希不再匹配），需要重新注册或重置密码。

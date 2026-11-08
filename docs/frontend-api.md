@@ -256,5 +256,5 @@ POST /threads/{thread_id}/runs/crons
 - 代理接口是**单次 Run 订阅**：子 agent 若被 `update_async_task` 再跑一轮，前端要按新的 `run_id` 重新连。
 - `service_token()` 是 10 年期长期 token（沿用 ADR-0004 的 shortcut），只在服务端使用，不下发浏览器。
 - 没有把文件写进 Space 的接口：空间知识只能手工放盘 / `scripts/okf_push_s3.py`（见 [S3.md](./S3.md)）。
-  文件上传接口（原 §3.7/§3.8）已从 main 移除。
+  会话上传走 §3.7 的 `POST /custom/uploads`（字节进对象存储）。
 - 没有 refresh token。

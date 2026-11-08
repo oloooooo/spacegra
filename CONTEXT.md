@@ -190,7 +190,7 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
   上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
-FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传读路径经 Mirage 在
+FastAPI / LangChain / deepagents。（无例外；旧的 xlsx→custom 懒加载已删。上传读路径经 Mirage 在
 `graphs/access/mirage_backend.py`，上传写路径在 `custom/api/uploads.py`，规则见 ADR-0018。）
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。

@@ -364,7 +364,7 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `s3.endpoint` | 空 | `S3_ENDPOINT` | 空 = 对象存储未启用；`okf.backend: s3` 只能改成 `local` |
+| `s3.endpoint` | 空 | `S3_ENDPOINT` | 空 = 未启用：上传返回 503，`okf.backend` 只能 `local` |
 | `s3.bucket` | `aegra-blobs` | `S3_BUCKET` | 桶名，启动时自动创建（幂等） |
 | `s3.region` | `us-east-1` | `S3_REGION` | 任意值（SeaweedFS 不校验） |
 
@@ -374,10 +374,21 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `okf.backend` | `local` | `OKF_BACKEND` | `local` 直接读 `graphs/<okf.dir>`；`s3` 读本地镜像 |
-| `okf.dir` | `okf` | `OKF_DIR` | 空间根目录名（相对 `graphs/`） |
+| `okf.backend` | `local` | `OKF_BACKEND` | `local` 直读本地 `knowledge/`；`s3` 读 S3 的本地镜像；`s3fs` 由 Mirage 直读对象存储（**只有这个模式下 agent 能看见 `/uploads`**） |
+| `okf.dir` | `knowledge` | `OKF_DIR` | 空间根目录名（相对仓库根） |
 | `okf.mirror_dir` | `.cache/okf` | `OKF_MIRROR_DIR` | `s3` 模式的镜像目录 |
 | `okf.mirror_ttl_seconds` | `0` | `OKF_MIRROR_TTL_SECONDS` | 镜像过期重拉的间隔；`0` = 只拉一次（改内容后手动跑 `scripts/okf_pull_s3.py`） |
+
+#### Mirage 虚拟文件系统（`graphs/access/mirage_backend.py`，ADR-0018）
+
+只在 `okf.backend: s3fs` 时启用：每 run 现建一个 `Workspace`（~1ms），两个 mount 共用一份进程级
+S3 客户端；`/` = `okf/`，`/uploads` = `uploads/<owner>/<thread>/`。
+
+| YAML 键 | 默认 | 覆盖变量 | 说明 |
+|---|---|---|---|
+| `mirage.redis_url` | `redis://127.0.0.1:6379/0` | `MIRAGE_REDIS_URL` | 缓存与索引的 Redis；空 = 进程内（单机开发） |
+| `mirage.cache_limit` | `256MB` | `MIRAGE_CACHE_LIMIT` | 文件缓存上限 |
+| `mirage.index_ttl_seconds` | `600` | `MIRAGE_INDEX_TTL_SECONDS` | 目录索引 TTL；外部改动对象后最多这么久自愈 |
 
 #### 图（`graphs/supervisor.py`）
 

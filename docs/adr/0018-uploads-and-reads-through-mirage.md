@@ -10,7 +10,7 @@
 > 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `uploads.*`。
 > 取代：[`archive`](./archive/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
 > `feat/unified-files-s3` 分支上的另一份 ADR-0017（与本仓库**已归档**的
-> [0017](./archive/0017-local-backend-scandir.md) 同号不同内容）不采用。
+> [0017](./0017-local-backend-scandir.md) 同号不同内容）不采用。
 
 ## 背景
 
