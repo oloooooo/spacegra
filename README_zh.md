@@ -47,7 +47,7 @@ cp .env_example .env
 | 文件 | 放什么 |
 |---|---|
 | `.env` | aegra 原生运行参数（数据库、端口、日志…）+ **密钥** + 第三方模型 key |
-| `config.yaml` | 本项目新增的非密钥参数（会话配额、文件上限、对象存储地址、知识空间）—— 已有默认值，不改也能跑 |
+| `config.yaml` | 本项目新增的非密钥参数（会话配额、文件上限、上传目录、知识空间、对象存储地址）—— 已有默认值，不改也能跑 |
 
 `.env` 至少改这几项：
 
@@ -76,7 +76,7 @@ OPENAI_BASE_URL=https://api.deepseek.com      # 用官方则可留空
 OPENAI_MODEL=deepseek-flash
 ```
 
-`config.yaml` 只改真要调的（示例：一个账号最多几个会话；生产接对象存储）：
+`config.yaml` 只改真要调的（示例：一个账号最多几个会话；把知识推给别处时填对象存储）：
 
 ```yaml
 quota:

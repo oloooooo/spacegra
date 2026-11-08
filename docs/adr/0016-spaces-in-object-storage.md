@@ -1,6 +1,8 @@
 # 空间内容进对象存储，backend 由 env 二选一
 
 > 状态：**已实现**（决定 2026-10-25；2026-10-26 复核代码后订正此状态行——之前一直写着「实现未开始」）。
+> **当前分支 `local-spacebackend` 已移除 `okf.backend` 开关**：只读本地 `knowledge/`，
+> 不再拉镜像（`okf_pull_s3.py` 已删）；只剩 `scripts/okf_push_s3.py` 可手动推送。
 > 落点：`shared/knowledge/root.py`（`local` 直读 / `s3` 拉本地镜像，`pull`/`push`）、
 > `scripts/okf_push_s3.py` 与 `scripts/okf_pull_s3.py`、`config.yaml` 的 `okf.backend`。
 > **布局变更**：2026-10 起本地数据目录从 `graphs/okf/` 移到仓库根 `knowledge/`（`okf.dir: knowledge`），

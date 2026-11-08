@@ -183,11 +183,11 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
   `middleware/` 中间层（Auth handler）。
 - `graphs/` —— **图面**，只在 run 里跑。根目录只放 `aegra.json` 直指的入口
   （`supervisor.py`、`space_agent.py`、`xlsx_agent.py`）；`middleware/` 中间层（AgentMiddleware）、
-  `access/` 横切的访问判定（spaces 列表、带 ACL 的 backend、Mirage 后端与 Workspace 池）、
+  `access/` 横切的访问判定（spaces 列表、带 ACL 的 backend、`/uploads` 路由到本地上传目录）、
   `tools/` 与 `prompts/`。
 - `shared/` —— **两侧共用的纯逻辑**：`config`（config.yaml 单例）、`token`（JWT 铸造）、
-  `outbox`（投递文本口径）、`session/`（Store 与对象存储底座、上传 key 布局与
-  上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
+  `outbox`（投递文本口径）、`session/`（Store 底座、上传字节的路径规则与落盘
+  `uploads.py`、上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
 FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传写路径在

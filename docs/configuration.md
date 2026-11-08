@@ -372,7 +372,7 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `okf.dir` | `okf` | `OKF_DIR` | 空间根目录名（相对 `graphs/`） |
+| `okf.dir` | `knowledge` | `OKF_DIR` | 空间根目录名（相对仓库根） |
 | `uploads.dir` | `data/uploads` | `UPLOADS_DIR` | 上传字节落盘位置；按 `<owner>/<thread>/` 隔离 |
 
 #### 图（`graphs/supervisor.py`）
@@ -588,9 +588,9 @@ docker run --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 ..
 quota:
   max_threads_per_user: 50
 s3:
-  endpoint: ""                # 空 = 对象存储不启用
+  endpoint: ""                # 空 = 不用对象存储；只有 okf_push_s3.py 会读它
 okf:
-  backend: local
+  dir: knowledge
 ```
 
 `.env`：见仓库根目录的 [`.env_example`](../.env_example)（aegra 原生参数、密钥、第三方 SDK）。**密钥只放这里**。

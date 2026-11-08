@@ -120,8 +120,9 @@ event: end        data: {"status": "success"}
 ### 3.7 `POST /custom/uploads`
 
 上传一个文件到当前会话（`multipart/form-data`，字段 `file` + `thread_id`）。
-字节进对象存储的 `uploads/<上传者>/<会话>/<文件名>`，同名即覆盖；台账行记归属与投递目标
-（ADR-0018）。只能往自己的会话传：线程不存在 404、不是自己的 403。
+字节落本机 `data/uploads/<上传者>/<会话>/<文件名>`（`config.yaml` 的 `uploads.dir`），同名即覆盖；
+台账行记归属与投递目标（ADR-0018）。只能往自己的会话传：线程不存在 404、不是自己的 403、
+会话正在跑 409（上传与 run 互斥）。
 
 ```json
 {
@@ -136,9 +137,9 @@ event: end        data: {"status": "success"}
 - `target_agent` 在上传那一刻算好：`<空间名>_xxx.xlsx` 且空间在你的授权内 → 该空间的子 agent；
   其他 xlsx（含写了别的空间名、你却没有权限的）→ 通用 `xlsx` 子 agent；md 等 → 主 agent 自己读。
 - 错误码：`413` 单文件超上限（表格按 `xlsx.max_blob_mb`，其余按 `session_files.max_upload_mb`）、
-  `409` 会话文件数超 `session_files.max_files_per_session`、`422` 文件名带路径分隔符、
-  `503` 对象存储不可用。
-- 上传后 agent 不需要刷新：它的文件系统就是对象存储，下次 `ls /uploads` 就能看见。
+  `409` 会话文件数超 `session_files.max_files_per_session`、`422` 文件名带分隔符/控制字符/Windows 设备名、
+  `503` 本机磁盘不可写。
+- 上传后 agent 不需要刷新：它的 `/uploads` 路由就是这个目录，下次 `ls /uploads` 就能看见。
 
 ## 4. 直接用的原生接口
 

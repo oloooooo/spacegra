@@ -434,8 +434,8 @@ aegra-api/
 │   ├── config.py         # config.yaml singleton
 │   ├── token.py          # JWT minting (user + service identity)
 │   ├── outbox.py         # delivery message format
-│   ├── session/          # LangGraph Store namespace + S3 blobs
-│   └── knowledge/        # knowledge root (local|s3) + AGENT.md parsing
+│   ├── session/          # LangGraph Store namespace + local upload dirs
+│   └── knowledge/        # knowledge root (local) + AGENT.md parsing
 ├── knowledge/            # space content (data, not code)
 ├── tests/                # pytest (unit / integration / e2e)
 ├── web/                  # Vue 3 frontend

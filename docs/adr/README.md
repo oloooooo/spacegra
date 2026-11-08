@@ -20,9 +20,9 @@
 | [0011](./0011-space-agent-is-dynamic.md) | 空间子 agent 动态化 | 一个 `domain_agent` 图服务所有 space，名单每次 run 现算，加空间不改代码 | `graphs/supervisor.py`、`graphs/space_agent.py`、`shared/knowledge/spec.py` |
 | [0012](./0012-thread-quota-replaces-task-limit.md) | thread 配额取代派活上限 | 限的是"账号能有几个会话"（子线程计入所属主管），不是并发算力 | `custom/service/quota.py`、`custom/middleware/auth.py` |
 | [0014](./0014-no-hitl-for-eval.md) | 不做 eval 的 HITL 审批 | 子任务只支持取消与状态通知；取消不占发件箱行、不唤醒主管 | `custom/api/tasks.py`、`graphs/middleware/async_task_guard.py` |
-| [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3` 二选一，`s3` 读本地镜像（不重写 14 个 backend 方法） | `shared/knowledge/root.py`、`scripts/okf_{push,pull}_s3.py` |
+| [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3` 二选一，`s3` 读本地镜像（不重写 14 个 backend 方法）。**本分支已停用**：只读本地 `knowledge/`，S3 只用于手动推送 | `shared/knowledge/root.py`、`scripts/okf_push_s3.py` |
 | [0017](./0017-local-backend-scandir.md) | 本地 backend 一趟 scandir | 每次调用只 `resolve` 一次、`os.scandir` 枚举、不跟符号链接；`glob` 快 50×、`grep` 仍交给 ripgrep | `graphs/access/local_backend.py` |
-| [0018](./0018-uploads-and-reads-through-mirage.md) | 上传重建：对象存储是唯一真相，读路径全走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 两个前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；上传仍 boto3 直写，台账只做归属与 `target_agent` | `graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
+| [0018](./0018-uploads-and-reads-through-mirage.md) | 上传重建：对象存储是唯一真相，读路径全走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 两个前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；上传仍 boto3 直写，台账只做归属与 `target_agent`。**本分支已改为本地盘** | `graphs/access/uploads_backend.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
 
 ## 已归档（6）
 
