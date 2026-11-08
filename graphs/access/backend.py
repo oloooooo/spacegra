@@ -40,6 +40,7 @@ from deepagents.backends.protocol import (
 )
 
 from graphs.access.spaces import spaces_from_config_or_runtime
+from shared.knowledge.root import knowledge_root
 
 logger = structlog.getLogger(__name__)
 
@@ -254,3 +255,12 @@ class SpaceBackend(FilesystemBackend):
             else:
                 out.extend(super().download_files([path]))
         return out
+
+
+def filesystem_backend(config: object) -> SpaceBackend:  # noqa: ARG001, ANN401
+    """非 Mirage 模式的 backend：只读知识根。
+
+    本分支（mirage-s3）的上传字节都在对象存储里，只有 `okf.backend: s3fs`
+    走 Mirage 才看得见；其余模式 agent 没有可读的上传目录。
+    """
+    return SpaceBackend(root_dir=knowledge_root())

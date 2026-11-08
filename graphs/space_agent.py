@@ -29,7 +29,7 @@ from langgraph.graph.state import RunnableConfig
 
 from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
 from graphs.access.spaces import allowed_spaces, upload_scope
-from graphs.access.uploads_backend import filesystem_backend
+from graphs.access.backend import filesystem_backend
 from graphs.model import model
 from graphs.tools import XLSX_TOOLS
 from shared import config
