@@ -1,13 +1,13 @@
 # 上传重建：字节与读路径都可切，集群走 Mirage
 
 > 状态：**已实现**（决定 2026-11-01）。
-> 落点：`graphs/access/mirage_backend.py`、`graphs/access/uploads_backend.py`、
-> `shared/session/uploads.py`（上传介质层）、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
+> 落点：`graphs/access/mirage_backend.py`、
+> `custom/service/uploads.py`（上传介质层）、`graphs/xlsx_agent.py`、`graphs/prompts/xlsx.md`、
 > `graphs/supervisor.py`、`graphs/space_agent.py`、`graphs/access/spaces.py`（`upload_scope`）、
 > `graphs/middleware/async_task_guard.py`（`_config_for` 转发上传目录）、
-> `custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py`、
+> `custom/api/uploads.py`、`shared/session/upload_rule.py`、
 > `shared/session/blobs.py`（`upload_prefix`/`upload_key`）、`custom/db/models.py`（`target_agent`）、
-> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `uploads.*`。
+> 迁移 `a7b8c9d0e1f2` / `b8c9d0e1f2a3`、`scripts/reap_upload_orphans.py`、`config.yaml` 的 `mirage.*` 与 `xlsx.cache_mode`。
 > 取代：[`archive`](./archive/) 里已删的 ADR-0013（会话文件在 Store）与 ADR-0015 的 key 布局；
 > `feat/unified-files-s3` 分支上的另一份 ADR-0017（与本仓库**已归档**的
 > [0017](./0017-local-backend-scandir.md) 同号不同内容）不采用。
