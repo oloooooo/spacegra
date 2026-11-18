@@ -189,8 +189,9 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
   `outbox`（投递文本口径）、`session/`（Store 与对象存储底座、上传 key 布局与
   上传路由规则 `upload_rule`）、`knowledge/`（知识根、`AGENT.md` 解析与脚手架）。
 
-规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
-FastAPI / LangChain / deepagents。（无例外；旧的 xlsx→custom 懒加载已删。上传读路径经 Mirage 在
+规则：`custom → shared`、`graphs → shared`，两个包基本互不 import；唯一例外是
+`custom` 可用 `graphs.tools.xlsx`（`duck.py` 的派生缓存 build/drop，上传时同步转换与
+删会话清理，见 ADR-0018）；`shared` 不 import FastAPI / LangChain / deepagents。上传读路径经 Mirage 在
 `graphs/access/mirage_backend.py`，上传写路径在 `custom/api/uploads.py`，规则见 ADR-0018。）
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。

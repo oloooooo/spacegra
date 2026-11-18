@@ -7,18 +7,21 @@
 写序不可换（与旧 ADR-0013 同一条教训）：
 
 1. 把字节写进对象存储（``blobs.put_stream``，边写边算 sha256，超限自己 abort）；
-2. 再 upsert 台账行 —— 行里带上传那一刻算好的投递目标 ``target_agent``。
+2. 表格在上传期同步转一次派生（PRD 5.6.4）：转不动就是上传失败，字节回滚；
+3. 再 upsert 台账行 —— 行里带上传那一刻算好的投递目标 ``target_agent``。
 
-崩在 1 和 2 之间的后果：多一个没人认领的对象（下次同名上传按覆盖处理），
+崩在 1 和 3 之间的后果：多一个没人认领的对象（下次同名上传按覆盖处理），
 比"行说有、字节没有"安全得多；反过来则会出现台账指向不存在的对象。
-所以 2 失败时尽力把 1 写的对象删掉，让状态回到"两边都没有"。
+所以 2/3 失败时尽力把 1 写的对象删掉，让状态回到"两边都没有"。
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any, BinaryIO
 
 import structlog
@@ -30,7 +33,7 @@ from custom.db.models import SessionObject
 from shared import config
 from shared.paths import safe_segment
 from shared.session import blobs
-from shared.session.upload_rule import route_upload
+from shared.session.upload_rule import is_xlsx, route_upload
 
 logger = structlog.getLogger(__name__)
 
@@ -66,8 +69,6 @@ def safe_name(name: str) -> str:
 
 def size_limit(name: str) -> int:
     """单文件字节上限：表格按 `xlsx.max_blob_mb`，其他按 `session_files.max_upload_mb`。"""
-    from shared.session.upload_rule import is_xlsx
-
     mb = config.get("xlsx.max_blob_mb" if is_xlsx(name) else "session_files.max_upload_mb")
     return int(mb) * 1024 * 1024
 
@@ -82,6 +83,42 @@ async def count_files(session: AsyncSession, owner: str, thread_id: str) -> int:
         )
         or 0
     )
+
+
+async def _convert_table(sha256: str, key: str) -> list[dict[str, Any]]:
+    """上传期同步转一次派生缓存（PRD 5.6.4）：失败就当上传失败。
+
+    同内容再传（含改名）时清单已命中，直接复用——派生按内容指纹寻址，不按文件。
+    """
+    # 唯一一处 custom -> graphs：`duck` 只用 shared + duckdb/openpyxl 的惰导入，
+    # 不会把整张图拖进 HTTP 启动路径（白名单见 tests/unit/test_layout.py）。
+    from graphs.tools.xlsx import duck
+
+    existing = await asyncio.to_thread(duck.reload_manifest, sha256, 0)
+    if existing is not None:
+        return list(existing["sheets"])
+    timeout = float(config.get("xlsx.convert_timeout_seconds"))
+    data = await asyncio.to_thread(blobs.get_or_none, key)
+    if data is None:
+        raise UploadError("对象存储读取失败，请重试", 503)
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "upload.xlsx"
+        source.write_bytes(data)
+        try:
+            manifest = await asyncio.wait_for(
+                asyncio.to_thread(duck.convert_upload, sha256, source, 0), timeout
+            )
+        except TimeoutError as exc:
+            # shortcut: 线程池里那次转换还在跑，可能事后又写一份派生；反正这份东西
+            # 下次查询会重算，多出来的字节由 xlsx.cache_local_max_mb 淘汰。
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(duck.drop_derived, sha256)
+            raise UploadError(f"表格转换超时（{timeout:g} 秒），请拆分后重传", 422) from exc
+        except duck.TableError as exc:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(duck.drop_derived, sha256)
+            raise UploadError(str(exc), 422) from exc
+    return list(manifest["sheets"])
 
 
 async def save_upload(
@@ -146,6 +183,14 @@ async def save_upload(
 
     target = route_upload(name, spaces)
     space = next((s for s in spaces if target == s), "")
+    # 表格在上传阶段就把派生建完：这一步失败 = 上传失败（原件回滚，不落台账）
+    sheets: list[dict[str, Any]] = []
+    if is_xlsx(name):
+        try:
+            sheets = await _convert_table(sha256, key)
+        except BaseException:
+            await _revert()
+            raise
     stmt = pg_insert(SessionObject).values(
         owner_identity=owner,
         thread_id=thread_id,
@@ -192,4 +237,5 @@ async def save_upload(
         "sha256": sha256,
         "target_agent": target,
         "virtual_path": f"/uploads/{name}",
+        "sheets": [{"name": s["name"], "rows": s["rows"], "columns": s["columns"]} for s in sheets],
     }

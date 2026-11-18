@@ -201,9 +201,10 @@ def test_delete_prefix_pages_and_batches(monkeypatch):
 
 
 def test_configured_follows_endpoint(monkeypatch):
-    monkeypatch.setenv("S3_ENDPOINT", "http://x:9000")
+    # 直接盯判据：空串 = 未配置（env 空串会让位给 config.yaml，见 shared/config.get）
+    monkeypatch.setattr(blobs.config, "get", lambda key: "http://x:9000" if key == "s3.endpoint" else None)
     assert blobs.configured() is True
-    monkeypatch.setenv("S3_ENDPOINT", "")
+    monkeypatch.setattr(blobs.config, "get", lambda key: "")
     assert blobs.configured() is False
 
 

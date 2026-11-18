@@ -5,7 +5,7 @@ Starlette 先把整个 multipart 解析完才进 handler，等看到 `UploadFile
 ASGI 层拦 `/custom/uploads`：有 `Content-Length` 就直接判，没有（chunked）就包一层
 `receive` 边收边数。
 
-上限 = 两类文件上限里的较大者 + 2MB 余量（multipart 头、其他表单字段），不是精确值
+上限 = 单次总量与单文件上限里的较大者 + 2MB 余量（multipart 头、其他表单字段），不是精确值
 ——精确值仍由 `put_stream` 的逐块计数负责。
 """
 
@@ -19,7 +19,12 @@ _SLACK = 2 * 1024 * 1024
 
 
 def upload_body_limit() -> int:
-    mb = max(int(config.get("xlsx.max_blob_mb")), int(config.get("session_files.max_upload_mb")), 1)
+    mb = max(
+        int(config.get("session_files.max_batch_mb")),
+        int(config.get("xlsx.max_blob_mb")),
+        int(config.get("session_files.max_upload_mb")),
+        1,
+    )
     return mb * 1024 * 1024 + _SLACK
 
 

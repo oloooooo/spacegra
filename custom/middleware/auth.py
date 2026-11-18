@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import os
 
 import jwt
@@ -9,8 +11,9 @@ from sqlalchemy import select
 from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import get_session_maker
-from custom.service.quota import MAX_THREADS_PER_USER
+from custom.db.models import SessionObject
 from custom.db.repositories import ThreadQuotaRepository, UserRepository, UserSpaceRepository
+from custom.service.quota import MAX_THREADS_PER_USER
 
 logger = structlog.getLogger(__name__)
 
@@ -120,6 +123,16 @@ async def _cascade_child_threads(ctx, value):
         owner = await session.scalar(select(ThreadORM.user_id).where(ThreadORM.thread_id == thread_id))
         if owner is None or (owner != ctx.user.identity and "write" not in (ctx.permissions or [])):
             return None  # 交给原生接口去 404/拒绝，这里不动任何东西
+        # 会话文件（ADR-0018）：表格派生按台账里的内容指纹整组删。派生可重建，所以
+        # 先删它、后删线程：万一原生删除失败，代价只是下次查询重转一遍。原件前缀
+        # 仍在 uploads/<owner>/<thread>/ 下，由 scripts/reap_upload_orphans.py 回收。
+        shas = list(
+            await session.scalars(
+                select(SessionObject.sha256).where(
+                    SessionObject.owner_identity == owner, SessionObject.thread_id == thread_id
+                )
+            )
+        )
         repo = ThreadQuotaRepository(session)
         children = await repo.list_children(thread_id)
         if children:
@@ -131,4 +144,14 @@ async def _cascade_child_threads(ctx, value):
             await repo.delete_threads(children)
     if children:
         logger.info("thread_children_deleted", parent=thread_id, children=len(children))
+    for sha256 in shas:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(_drop_derived, sha256)
     return None
+
+
+def _drop_derived(sha256: str) -> None:
+    """删一个内容指纹的派生缓存。惰导入：HTTP 启动路径不拖进图侧模块。"""
+    from graphs.tools.xlsx import duck
+
+    duck.drop_derived(sha256)

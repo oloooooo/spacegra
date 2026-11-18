@@ -1,5 +1,5 @@
 /** 与后端接口一一对应（见 aegra-api/docs/frontend-api.md）。 */
-import { api, sse } from "./client";
+import { api, apiForm, sse } from "./client";
 
 export type GraphList = { graphs: string[]; identity: string; permissions: string[] };
 
@@ -115,3 +115,24 @@ export const searchCrons = (limit = 50) => api<Cron[]>("/runs/crons/search", { m
 export const createCron = (threadId: string, body: unknown) => api<unknown>(`/threads/${threadId}/runs/crons`, { method: "POST", body: JSON.stringify(body) });
 export const patchCron = (cronId: string, body: unknown) => api<Cron>(`/runs/crons/${cronId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteCron = (cronId: string) => api<unknown>(`/runs/crons/${cronId}`, { method: "DELETE" });
+
+// ---------- 会话文件上传 ----------
+export type Uploaded = {
+  name: string;
+  status: "ok";
+  size: number;
+  sha256: string;
+  target_agent: string;
+  virtual_path: string;
+  sheets: { name: string; rows: number; columns: number }[];
+};
+export type UploadFailed = { name: string; status: "failed"; code: number; error: string };
+export type UploadResult = { files: (Uploaded | UploadFailed)[] };
+
+/** 一次可传多个文件；单个失败不影响同批（HTTP 207 + 逐文件结果）。 */
+export const uploadFiles = (threadId: string, files: File[]) => {
+  const form = new FormData();
+  form.append("thread_id", threadId);
+  for (const f of files) form.append("files", f, f.name);
+  return apiForm<UploadResult>("/custom/uploads", form);
+};

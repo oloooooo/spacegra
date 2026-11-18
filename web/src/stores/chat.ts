@@ -324,7 +324,7 @@ export const useChat = defineStore("chat", () => {
   return {
     identity, permissions, isSuper, threads, threadId, messages, streaming, interrupts, tasks,
     activeTasks, running, error, currentRun,
-    login, bootstrap, logout, loadThreads, openThread, refreshState, send, resume, cancel, cancelTask,
+    login, bootstrap, logout, loadThreads, openThread, refreshState, send, resume, cancel, cancelTask, ensureThread,
     removeThread, isAuthError,
   };
 });

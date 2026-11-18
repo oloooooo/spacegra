@@ -41,6 +41,16 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: authHeaders({ "Content-Type": "application/json", ...(init.headers as Record<string, string>) }),
   });
+  return unwrap<T>(res);
+}
+
+/** multipart 上传：Content-Type 交给浏览器（要带 boundary），其余同 api()。 */
+export async function apiForm<T>(path: string, form: FormData): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { method: "POST", body: form, headers: authHeaders() });
+  return unwrap<T>(res);
+}
+
+async function unwrap<T>(res: Response): Promise<T> {
   if (res.status === 401) {
     clearToken();
     throw new ApiError(401, "登录已过期，请重新登录");

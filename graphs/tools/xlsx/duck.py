@@ -56,6 +56,8 @@ from shared.session import blobs
 
 from . import store
 
+_MANIFEST_VERSION = 3  # v3 起带行号列：旧派生直接作废（见 reload_manifest）
+_ROW = "行号"  # 派生里的真实行号列（PRD 5.6.13：结果要能回到原表的哪一行）
 _MAX_ROWS = 200
 _MAX_HITS = 100
 _MAX_VALUE_LEN = 80
@@ -398,8 +400,9 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
         sheets: list[dict[str, Any]] = []
         for meta in metas:
             columns, names = _staging(con, source, meta, header)
+            # `_rn` 是 staging 里的物理行号（1 = 表头行），换算成 Excel 的行号：header + _rn。
             con.execute(
-                "CREATE TEMP TABLE cleaned AS SELECT "
+                f"CREATE TEMP TABLE cleaned AS SELECT _rn + {int(header)} AS {_ident(_ROW)}, "
                 + ", ".join(
                     f"CASE WHEN trim({_ident(c)}) = '' THEN NULL ELSE {_ident(c)} END AS {_ident(n)}"
                     for c, n in zip(columns, names, strict=True)
@@ -425,7 +428,7 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
                 tmp.parent.mkdir(parents=True, exist_ok=True)
                 tmp.unlink(missing_ok=True)
                 con.execute(
-                    f"COPY (SELECT {_projection(names, types)} FROM cleaned) TO "
+                    f"COPY (SELECT {_ident(_ROW)}, {_projection(names, types)} FROM cleaned) TO "
                     f"{_literal(tmp.as_posix())} (FORMAT PARQUET, COMPRESSION ZSTD)"
                 )
                 data = tmp.read_bytes()
@@ -445,7 +448,7 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
         con.close()
 
     manifest = {
-        "version": 2,
+        "version": _MANIFEST_VERSION,
         "sha256": sha256,
         "header": int(header),
         "engine": "duckdb",
@@ -464,6 +467,34 @@ def build_derived(sha256: str, source: Path, header: int = 0) -> dict[str, Any] 
     return manifest
 
 
+class TableError(Exception):
+    """上传期可预期的表格问题：消息直接展示给用户（PRD 5.6.4 的几种拒绝）。"""
+
+
+def convert_upload(sha256: str, source: Path, header: int = 0) -> dict[str, Any]:
+    """上传期同步转换（同步，跑在线程池里）：不可用一律抛 `TableError`。
+
+    `build_derived` 把拒绝拆成 None/ValueError，这里翻成用户能照做的一句话：
+    文件损坏、缺尺寸信息、超 `xlsx.max_cells`，再加"一个 sheet 都没转出来"。
+    """
+    try:
+        manifest = build_derived(sha256, source, header)
+    except ValueError as exc:
+        raise TableError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - DuckDB 读不动也算坏文件，不能让它变成 500
+        raise TableError(f"无法解析表格：{exc}") from exc
+    if manifest is None:
+        raise TableError(f"表格太大：超过 {_MAX_CELLS} 个单元格上限（xlsx.max_cells）")
+    if not manifest["sheets"]:
+        raise TableError("表格里没有可用数据：所有工作表都是空的")
+    return manifest
+
+
+def _stale(manifest: dict[str, Any]) -> bool:
+    """旧版本的派生（没有行号列）直接作废：重转一次的代价远小于查询报缺列。"""
+    return int(manifest.get("version") or 0) < _MANIFEST_VERSION
+
+
 def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
     """读清单。本地没有就看对象存储（多实例共享）；远端也没有就返回 None。
 
@@ -475,6 +506,9 @@ def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            return None
+        if _stale(manifest):
+            shutil.rmtree(path.parent, ignore_errors=True)
             return None
         if _parquet_missing(manifest, sha256, header):
             shutil.rmtree(path.parent, ignore_errors=True)
@@ -488,6 +522,8 @@ def reload_manifest(sha256: str, header: int = 0) -> dict[str, Any] | None:
     try:
         manifest = json.loads(raw.decode("utf-8"))
     except ValueError:
+        return None
+    if _stale(manifest):
         return None
     store.write_atomic(path, raw)
     return manifest
@@ -526,6 +562,30 @@ def prune_remote(older_than_days: float, *, dry_run: bool = False) -> tuple[int,
             if len(tail) >= 2 and len(tail[0]) == 64:
                 shutil.rmtree(_derived_dir() / tail[0], ignore_errors=True)
     return len(victims), total
+
+
+def drop_derived(sha256: str) -> None:
+    """删掉某个内容指纹的全部派生（本地整组目录 + 对象存储前缀）。删会话时调。
+
+    指纹按内容共享：另一个会话还有同内容的文件时，它的下次查询会重新转换一遍
+    （原件在各会话自己的 uploads 前缀里），既不会读到别人的东西，也不会丢数据。
+    """
+    shutil.rmtree(_derived_dir() / sha256, ignore_errors=True)
+    if cache_mode() != "s3":
+        return
+    prefix = f"{str(config.get('xlsx.cache_prefix')).strip('/')}/{sha256}/"
+    s3, bucket = blobs.client(), blobs.bucket()
+    token: str | None = None
+    while True:
+        kw: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            kw["ContinuationToken"] = token
+        page = s3.list_objects_v2(**kw)
+        for obj in page.get("Contents", []):
+            blobs.delete(obj["Key"])
+        if not page.get("IsTruncated"):
+            return
+        token = page.get("NextContinuationToken")
 
 
 def _parquet_missing(manifest: dict[str, Any], sha256: str, header: int) -> bool:
@@ -709,7 +769,7 @@ def info(sha256: str, sheet: str | None, header: int = 0) -> str:
         con.close()
     lines.append("")
     lines.append(f"[预览] sheet={target['name']}")
-    lines.append(_csv(target["columns"], preview))
+    lines.append(_csv([_ROW, *target["columns"]], preview))
     return "\n".join(lines)
 
 
@@ -740,9 +800,11 @@ def query(
     local = local_parquet(sha256, target["name"], header)
     if local is None:
         raise FileNotFoundError(f"派生缓存缺失：{target['name']}")
-    selected = [c for c in (columns or []) if c in target["columns"]]
-    unknown = [c for c in (columns or []) if c not in target["columns"]]
-    projection = ", ".join(_ident(c) for c in selected) if selected else "*"
+    requested = [c for c in (columns or []) if c != _ROW]
+    selected = [c for c in requested if c in target["columns"]]
+    unknown = [c for c in requested if c not in target["columns"]]
+    # 行号列永远排在最前：没选列时 `*` 自带，选了列就显式带上。
+    projection = ", ".join([_ident(_ROW), *(_ident(c) for c in selected)]) if selected else "*"
     size = min(max(int(limit), 1), _MAX_ROWS)
     start = max(int(offset), 0)
     con = _connect()
@@ -755,7 +817,7 @@ def query(
     head = f"[{target['name']}] 共 {total} 行匹配，返回第 {start + 1}–{start + len(rows)} 行："
     if unknown:
         head += f"\n（忽略不存在的列：{'、'.join(unknown)}）"
-    return head + "\n" + _csv(list(selected) or target["columns"], rows)
+    return head + "\n" + _csv([_ROW, *(selected or target["columns"])], rows)
 
 
 def search(sha256: str, keyword: str, sheet: str | None, limit: int, header: int = 0) -> str:
@@ -773,23 +835,23 @@ def search(sha256: str, keyword: str, sheet: str | None, limit: int, header: int
             local = local_parquet(sha256, item["name"], header)
             if local is None:
                 raise FileNotFoundError(f"派生缓存缺失：{item['name']}（请删除后重新上传）")
-            columns = item["columns"][:_MAX_COLUMNS]
-            if not columns:
-                continue
-            parts = [
-                f"SELECT {_literal(c)} AS col, count(*) AS n FROM {_source(local)} "
-                f"WHERE lower(CAST({_ident(c)} AS VARCHAR)) LIKE {_literal(needle)}"
-                for c in columns
-            ]
-            for col, count in _rows(con, " UNION ALL ".join(parts)):
-                if count:
-                    hits.append(f"sheet={item['name']} 列={col} 命中 {count} 格")
+            for column in item["columns"][:_MAX_COLUMNS]:
+                if len(hits) >= cap:
+                    break
+                # 逐行给命中位置：只报"某列命中 n 格"没法回到原表（PRD 5.6.13）
+                sql = (
+                    f"SELECT {_ident(_ROW)}, CAST({_ident(column)} AS VARCHAR) FROM {_source(local)} "
+                    f"WHERE lower(CAST({_ident(column)} AS VARCHAR)) LIKE {_literal(needle)} "
+                    f"ORDER BY {_ident(_ROW)} LIMIT {cap - len(hits)}"
+                )
+                for row_no, value in _rows(con, sql):
+                    hits.append(f"sheet={item['name']} 行={row_no} 列={column} 值={_format_value(value)}")
     finally:
         con.close()
     if not hits:
         return f"没有找到「{keyword}」（搜索范围：{'、'.join(t['name'] for t in targets)}）"
-    head = f"「{keyword}」命中 {len(hits)} 处（按列聚合）：" if len(hits) > cap else f"「{keyword}」命中："
-    return head + "\n" + "\n".join(hits[:cap])
+    head = f"「{keyword}」命中（最多返回 {cap} 条）：" if len(hits) >= cap else f"「{keyword}」命中："
+    return head + "\n" + "\n".join(hits)
 
 
 def profile(sha256: str, sheet: str | None, header: int = 0) -> str:

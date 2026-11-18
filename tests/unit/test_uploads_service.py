@@ -159,3 +159,46 @@ class TestOverwriteRollback:
 
         assert store.objects == {"uploads/u1/t1/a.md": b"new"}
         assert session.commits == 1
+
+
+class TestConvertTable:
+    """上传期同步转换的粘合层（ADR-0018）：把 duck 的失败翻译成带状态码的 UploadError。"""
+
+    async def test_reuses_existing_derived(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from graphs.tools.xlsx import duck
+
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(duck, "reload_manifest", lambda sha, header: {"sheets": [{"name": "S1"}]})
+        monkeypatch.setattr(duck, "convert_upload", lambda *a, **k: calls.append(("convert", a[0])))
+        assert await uploads._convert_table("abc", "uploads/o/t/a.xlsx") == [{"name": "S1"}]
+        assert calls == []  # 命中派生就不再转换
+
+    async def test_rejects_corrupt_workbook_and_drops_derived(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from graphs.tools.xlsx import duck
+
+        dropped: list[str] = []
+        monkeypatch.setattr(duck, "reload_manifest", lambda sha, header: None)
+        monkeypatch.setattr(duck, "convert_upload", lambda *a, **k: (_ for _ in ()).throw(duck.TableError("无法解析表格：坏文件")))
+        monkeypatch.setattr(duck, "drop_derived", dropped.append)
+        monkeypatch.setattr(uploads.blobs, "get_or_none", lambda key: b"bytes")
+
+        with pytest.raises(uploads.UploadError) as e:
+            await uploads._convert_table("abc", "uploads/o/t/a.xlsx")
+        assert e.value.status_code == 422
+        assert "无法解析表格" in e.value.message
+        assert dropped == ["abc"]
+
+    async def test_timeout_is_a_failed_upload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from graphs.tools.xlsx import duck
+
+        dropped: list[str] = []
+        monkeypatch.setattr(duck, "reload_manifest", lambda sha, header: None)
+        monkeypatch.setattr(duck, "drop_derived", dropped.append)
+        monkeypatch.setattr(uploads.blobs, "get_or_none", lambda key: b"bytes")
+        monkeypatch.setattr("shared.config.get", lambda key: 0 if key == "xlsx.convert_timeout_seconds" else None)
+
+        with pytest.raises(uploads.UploadError) as e:
+            await uploads._convert_table("abc", "uploads/o/t/a.xlsx")
+        assert e.value.status_code == 422
+        assert "超时" in e.value.message
+        assert dropped == ["abc"]

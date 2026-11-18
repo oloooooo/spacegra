@@ -326,19 +326,21 @@ checkpoint），而启动日志里**没有任何告警**。
 >
 > 所以：改 `access_token_ttl` 只会变用户的登录频率，子 agent 照常跑；反过来想“让服务 token 失效”只能改 `JWT_SECRET`（代价：所有用户 token 同时失效）。
 
-#### 会话文件 md（`shared/session/store.py`）
+#### 会话文件（`shared/session/store.py`）
 
-md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键只剩底座在模块导入时读取（保留给后续分支）。
+会话文件的上传与台账（一次可传多个文件，`POST /custom/uploads`）。
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
-| `session_files.max_upload_mb` | `10` | `MAX_UPLOAD_MB` | md 单文件上限（当前无入口） |
-| `session_files.max_files_per_session` | `50` | `MAX_FILES_PER_SESSION` | md 每会话文件数 |
-| `session_files.upload_ttl_minutes` | `4320`（72h） | `UPLOAD_TTL_MINUTES` | md 的孤儿保留期，语义是「最后读取后多久」 |
+| `session_files.max_upload_mb` | `10` | `MAX_UPLOAD_MB` | 单个 md/普通文件上限 |
+| `session_files.max_batch_mb` | `50` | `MAX_BATCH_MB` | 一次上传（多文件合计）的总量上限，超了整批 413 |
+| `session_files.max_files_per_session` | `50` | `MAX_FILES_PER_SESSION` | 每会话文件数 |
+| `session_files.upload_ttl_minutes` | `4320`（72h） | `UPLOAD_TTL_MINUTES` | 孤儿原件的保留期，语义是「最后读取后多久」（`scripts/reap_upload_orphans.py`） |
+| `session_files.manifest_max_entries` | `20` | `MANIFEST_MAX_ENTRIES` | 每轮注入主管系统提示的文件清单最多列几条（`graphs/middleware/upload_manifest.py`）；`0` = 关闭 |
 
 #### xlsx 工具（`graphs/tools/xlsx/`）
 
-把知识空间里的存量 xlsx 建 SQLite 索引再查（`xlsx_info/query/search/profile`）。上传相关的三个键（`max_blob_mb`、`max_xlsx_files_per_session`、`max_blob_mb_per_user`）现在**无人读**，仅为兼容保留。
+把知识空间/上传的 xlsx 转成 Parquet 派生（按 sheet、带列类型与行号）再查（`xlsx_info/query/search/profile`）。派生按内容指纹寻址、清单最后写；上传时同步转换（`custom/service/uploads.py`），失败即上传失败。`max_cells` 以外的会话级配额（`max_blob_mb`、`max_xlsx_files_per_session`、`max_blob_mb_per_user`）目前只在文档里，代码没读。
 
 | YAML 键 | 默认 | 覆盖变量 | 说明 |
 |---|---|---|---|
@@ -353,6 +355,7 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 | `xlsx.cache_mode` | `local` | `XLSX_CACHE_MODE` | 派生缓存介质：`local` 只落本机 / `s3` 把派生对象写到对象存储并**直读**（多实例无需本地缓存；未配对象存储时自动退回 `local`） |
 | `xlsx.cache_prefix` | `xlsx-derived` | `XLSX_CACHE_PREFIX` | `cache_mode=s3` 时的对象前缀；派生对象按内容哈希命名，可随时清 |
 | `xlsx.cache_local_max_mb` | `2048` | `XLSX_CACHE_LOCAL_MAX_MB` | 本机派生缓存预算，超了按最久未改动淘汰 |
+| `xlsx.convert_timeout_seconds` | `120` | `XLSX_CONVERT_TIMEOUT_SECONDS` | 上传时单文件转换的超时；超了按上传失败并清派生 |
 
 解析 xlsx 用的是 DuckDB 的 `excel` 扩展（`read_xlsx`）。首次启动会自动 `LOAD`，
 DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网部署要预置**：

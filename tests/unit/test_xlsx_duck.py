@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 
 from graphs.tools.xlsx import duck, store
+from shared import config
+
+
+@pytest.fixture(autouse=True)
+def _local_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这批断言按 local 派生缓存写：仓库 config.yaml 可能配了 s3，别让它改断言语义。"""
+    real = config.get
+    monkeypatch.setattr(config, "get", lambda key: "local" if key == "xlsx.cache_mode" else real(key))
 
 SHA = "a" * 64
 
@@ -174,7 +182,7 @@ def test_profile_escapes_hostile_column_names(tmp_path: Path, monkeypatch) -> No
     duck._manifest_path(SHA).write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": duck._MANIFEST_VERSION,
                 "sha256": SHA,
                 "header": 0,
                 "engine": "duckdb",
@@ -345,3 +353,91 @@ def test_size_limit_drops_whole_cache_group(tmp_path: Path, monkeypatch) -> None
     duck._enforce_size_limit()
 
     assert not group.exists()
+
+
+def _need_excel() -> None:
+    import duckdb
+
+    try:
+        duckdb.connect().execute("LOAD excel")
+    except Exception:  # noqa: BLE001 - 没装 excel 扩展的环境跳过
+        pytest.skip("duckdb excel 扩展未安装")
+
+
+def _book(path: Path) -> Path:
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "数据"
+    sheet.append(["客户", "金额"])
+    sheet.append(["甲", 100])
+    sheet.append(["乙", 200])
+    book.save(path)
+    return path
+
+
+def test_derived_has_excel_row_numbers(tmp_path: Path, monkeypatch) -> None:
+    """派生里第一列是 Excel 真实行号（表头在第 1 行 → 第一条数据是 2），查询结果要带上它。"""
+    import duckdb
+
+    _need_excel()
+    source = _book(tmp_path / "src.xlsx")
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+
+    manifest = duck.build_derived("r1", source, 0)
+
+    assert manifest is not None
+    assert manifest["version"] == duck._MANIFEST_VERSION == 3
+    parquet = duck.store_path("r1", "数据", 0)
+    rows = duckdb.connect().execute(f"SELECT \"行号\", 客户 FROM read_parquet('{parquet.as_posix()}') ORDER BY 1").fetchall()
+    assert rows == [(2, "甲"), (3, "乙")]
+
+
+def test_old_manifest_version_is_discarded(tmp_path: Path, monkeypatch) -> None:
+    """v2 的派生没有行号列，加载时必须当不存在（否则查询会指向缺列的老 parquet）。"""
+    _need_excel()
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+    path = duck._manifest_path("old", 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 2, "sha256": "old", "header": 0, "sheets": []}), encoding="utf-8")
+
+    assert duck.reload_manifest("old", 0) is None
+    assert not path.parent.exists()
+
+
+def test_convert_upload_maps_duck_errors_to_table_error(tmp_path: Path, monkeypatch) -> None:
+    """上传期要把 duck 的异常翻译成能直接回给用户的 TableError。"""
+    _need_excel()
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+    broken = tmp_path / "broken.xlsx"
+    broken.write_bytes(b"not a workbook")
+
+    with pytest.raises(duck.TableError) as e:
+        duck.convert_upload("bad", broken, 0)
+    assert "无法读取工作簿" in str(e.value)
+
+
+def test_convert_upload_rejects_empty_workbook(tmp_path: Path, monkeypatch) -> None:
+    from openpyxl import Workbook
+
+    _need_excel()
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+    empty = tmp_path / "empty.xlsx"
+    Workbook().save(empty)  # 只有一个空 sheet，没有任何数据行
+
+    with pytest.raises(duck.TableError) as e:
+        duck.convert_upload("empty", empty, 0)
+    assert "没有可用数据" in str(e.value)
+
+
+def test_drop_derived_removes_local_group(tmp_path: Path, monkeypatch) -> None:
+    _need_excel()
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path / "cache")
+    source = _book(tmp_path / "src.xlsx")
+    assert duck.build_derived("dropme", source, 0) is not None
+    assert duck._derived_dir().joinpath("dropme").exists()
+
+    duck.drop_derived("dropme")
+
+    assert not duck._derived_dir().joinpath("dropme").exists()

@@ -10,8 +10,11 @@
 
 1. custom 不许 import graphs（HTTP 启动路径不能拖进整张图）；
 2. shared 不许 import 任何一侧（它是两侧的公共底座，不能反向依赖）；
-3. graphs 一行例外也没有了（原来唯一一处是 xlsx 懒加载会话文件元数据，
-   已随上传功能移除）。
+3. graphs 不许 import custom（graph 不能反向依赖 HTTP 层）。
+
+白名单只给「上传时同步转换表格」这一条：custom/service/uploads.py 与
+custom/middleware/auth.py 需要 graphs/tools/xlsx/duck 的 build/drop 派生能力，
+而 duck 本身只用 shared + duckdb/openpyxl（惰导入），不会把图带进启动路径。
 
 另外校验 aegra.json 里声明的入口文件与导出名真的存在——重命名漏改配置会在这里报错，
 而不是等到启动时。
@@ -28,7 +31,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 # graphs -> custom 的唯一例外：相对导入的模块前缀
-GRAPHS_ALLOWED: set[str] = set()  # graphs 不该 import custom（session_files 已随上传功能移除）
+GRAPHS_ALLOWED: set[str] = set()  # graphs 不该 import custom
+# custom -> graphs 的唯一例外：表格派生缓存（ADR-0018，上传时同步转换 + 删会话清理）
+CUSTOM_ALLOWED: set[str] = {"graphs.tools.xlsx"}
 
 
 def _imports(path: Path) -> set[str]:
@@ -59,7 +64,7 @@ def test_dependency_direction(pkg: str) -> None:
             first = mod.split(".")[0]
             if first not in forbidden:
                 continue
-            if pkg == "graphs" and any(a == mod or a.startswith(mod + ".") for a in GRAPHS_ALLOWED):
+            if any(a == mod or a.startswith(mod + ".") for a in (GRAPHS_ALLOWED if pkg == "graphs" else CUSTOM_ALLOWED)):
                 continue
             offenders.append(f"{path.relative_to(ROOT).as_posix()} -> {mod}")
     assert not offenders, f"{pkg}/ 不该 import 这些模块：\n" + "\n".join(offenders)

@@ -29,6 +29,7 @@ from graphs.access.mirage_backend import build_workspace, for_agent, run_scope
 from graphs.access.spaces import allowed_spaces, upload_scope
 from graphs.access.backend import filesystem_backend
 from graphs.middleware.async_task_guard import AsyncTaskGuard
+from graphs.middleware.upload_manifest import upload_manifest
 from graphs.prompts import MAIN_SYSTEM_PROMPT
 from graphs.tools import MAIN_TOOLS
 from shared.knowledge.spec import list_spaces, load_agent_spec, space_dir
@@ -153,6 +154,8 @@ def graph(config: RunnableConfig):  # noqa: ANN201 — 返回编译后的图
             middleware=[
                 TodoListMiddleware(),
                 AsyncTaskGuard(specs),
+                # 每轮把本会话已上传文件清单拼进系统提示（PRD 5.5.5，不进 checkpoint）
+                upload_manifest(),
             ],
             subagents=[*specs.values()],
             permissions=[FilesystemPermission(operations=["write"], paths=["/"], mode="deny")],

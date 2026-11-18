@@ -147,6 +147,35 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
 一起删，否则本机会一直指向已不存在的对象）。升级后旧的
 `<cache_dir>/*.sqlite`（老索引文件）已经没人读，可以直接删。
 
+### 9. 上传即转换、清单每轮注入、删会话即清派生
+
+PRD 5.5/5.6 对齐后补的四件事（2026-11）：
+
+1. **转换从「第一次查询」挪到「上传完成」**：`custom/service/uploads.py` 写完对象字节后
+   同步调 `duck.convert_upload`，失败或超时（`xlsx.convert_timeout_seconds`，默认 120s）
+   就回滚字节、不落台账、整次上传按失败返回。懒转换（`duck.ensure`）保留，给历史文件与
+   直接塞进 S3 的对象兜底——同一份派生，两条入口。
+2. **派生多一列 `行号`**（Excel 真实行号 = 数据行 + header）。`xlsx_query`/`xlsx_search`
+   的输出都带它，PRD 5.6 要的「命中行区间」不再只是 offset。manifest `version` 2→3，
+   `reload_manifest` 见到老版本直接当不存在（否则会去读缺列的老 parquet）。
+3. **删会话即清派生**：`custom/middleware/auth.py` 的 `@auth.on.threads.delete` 按该会话
+   台账里的 `sha256` 整组删（本机目录 + `xlsx.cache_prefix/<sha256>/` 远端前缀）。派生可
+   重建，所以**先删派生、后删线程**：原生删除失败时最坏代价是下次查询重转一遍。原件仍在
+   `uploads/<owner>/<thread>/`，由 `scripts/reap_upload_orphans.py` 按 TTL 回收。
+4. **清单每轮注入**：`graphs/middleware/upload_manifest.py` 用 `dynamic_prompt` 拼
+   「当前系统提示 + 本会话文件清单」，不进 checkpoint（写进 messages 就每轮留一条、历史
+   越滚越长）。文件名先抹控制字符并声明「只当数据」；超
+   `session_files.manifest_max_entries` 只留最近 N 条并提示 `ls /uploads`。任何异常都退回
+   原提示——清单是增强，不能把 run 弄挂。
+
+另外两处口径：
+
+- `custom` 破例 import `graphs.tools.xlsx`（转换与清理），`tests/unit/test_layout.py` 的
+  `CUSTOM_ALLOWED` 钉住这一条；duck 只用 `shared` + 惰导入的 duckdb/openpyxl，不把框架
+  拖进 HTTP 启动路径。
+- PRD 5.5.13「签名凭据」不另做：agent 读文件走 Mirage Workspace（凭据在服务端，不进提示/
+  日志/浏览器），浏览器只经服务端 API，没有直连对象存储的 URL 可签。
+
 ## 代价与已知风险
 
 - **`grep` 慢**：L 档全库 grep 1839ms（S3）vs 宿主 ripgrep 351ms；S 档快（8.6ms vs 22.3ms）。
