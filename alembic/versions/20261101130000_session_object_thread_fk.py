@@ -1,4 +1,4 @@
-"""session_object.thread_id → thread(thread_id)，删会话即删台账行（ADR-0018）
+"""session_object.thread_id → thread(thread_id)，删会话即删台账行（ADR-0020）
 
 读路径不查台账，但**删会话**必须让台账跟着走，否则同名上传会在新会话里撞到旧行
 （主键是 `(owner, thread, name)`，不会真撞，但孤儿行会一直累加、配额也会算错）。

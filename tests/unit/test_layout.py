@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # graphs -> custom 的唯一例外：相对导入的模块前缀
 GRAPHS_ALLOWED: set[str] = set()  # graphs 不该 import custom
-# custom -> graphs 的唯一例外：表格派生缓存（ADR-0018，上传时同步转换 + 删会话清理）
+# custom -> graphs 的唯一例外：表格派生缓存（ADR-0020，上传时同步转换 + 删会话清理）
 CUSTOM_ALLOWED: set[str] = {"graphs.tools.xlsx"}
 
 

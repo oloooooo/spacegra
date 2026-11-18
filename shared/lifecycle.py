@@ -2,7 +2,7 @@
 
 为什么放在 `shared/`：`custom/` 不许 import `graphs/`（`tests/unit/test_layout.py` 守着，
 理由是 HTTP 启动路径不该拖进整张图）。但 `custom/app.py` 的 lifespan 确实需要在退出时
-关掉图侧的资源池（Mirage 的 Workspace 池，ADR-0018）——那就让图侧在导入时把清理函数
+关掉图侧的资源池（Mirage 的 Workspace 池，ADR-0020）——那就让图侧在导入时把清理函数
 登记到这里，HTTP 侧只调 `close_all()`，两边都不越线。
 
 用法::

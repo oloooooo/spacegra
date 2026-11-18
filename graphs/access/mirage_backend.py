@@ -1,7 +1,7 @@
 """Mirage（对象存储 VFS）上的只读 backend：每 run 一个 Workspace，每个 agent 一个 session。
 
 为什么是 Mirage：知识空间与上传文件都在对象存储（S3 协议）里，Mirage 把它们当虚拟文件系统，
-`ls/read/grep/glob` 全部经 VFS 走对象存储，不需要本地镜像。代价与取舍见 ADR-0018。
+`ls/read/grep/glob` 全部经 VFS 走对象存储，不需要本地镜像。代价与取舍见 ADR-0020。
 
 三个不能改的约定：
 

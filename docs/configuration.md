@@ -382,7 +382,7 @@ DuckDB 在加载时会按需从 extensions.duckdb.org 下载；**离线/内网�
 | `okf.mirror_dir` | `.cache/okf` | `OKF_MIRROR_DIR` | `s3` 模式的镜像目录 |
 | `okf.mirror_ttl_seconds` | `0` | `OKF_MIRROR_TTL_SECONDS` | 镜像过期重拉的间隔；`0` = 只拉一次（改内容后手动跑 `scripts/okf_pull_s3.py`） |
 
-#### Mirage 虚拟文件系统（`graphs/access/mirage_backend.py`，ADR-0018）
+#### Mirage 虚拟文件系统（`graphs/access/mirage_backend.py`，ADR-0020）
 
 只在 `okf.backend: s3fs` 时启用：每 run 现建一个 `Workspace`（~1ms），两个 mount 共用一份进程级
 S3 客户端；`/` = `okf/`，`/uploads` = `uploads/<owner>/<thread>/`。
@@ -421,7 +421,7 @@ S3 客户端；`/` = `okf/`，`/uploads` = `uploads/<owner>/<thread>/`。
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `JWT_SECRET` | **无（必填）** | HS256 签/验 access token。缺失 = 启动即 `KeyError: 'JWT_SECRET'` |
-| `PASSWORD_PEPPER` | **无（必填）** | 密码哈希前拼接的全局密文。改了这个值，已注册账号全部登不上（旧哈希不再匹配） |
+| `PASSWORD_PEPPER` | **无（必填）** | 密码哈希前拼接的全局密文。改了这个值，已有账号全部登不上（旧哈希不再匹配），需超管重置密码 |
 | `SESSION_SCOPE_SECRET` | `dev-session-scope` | ⚠ **当前代码已不读**：会话作用域随上传功能一起移除，仅历史部署保留此键 |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `dev` / `dev` | 对象存储凭证（SeaweedFS 未配 IAM 时任意值） |
 

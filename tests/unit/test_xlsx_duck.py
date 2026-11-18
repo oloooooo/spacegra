@@ -1,4 +1,4 @@
-"""派生缓存（ADR-0018 §6）里可以离线测的部分：路径、key、谓词闸门、模式解析。"""
+"""派生缓存（ADR-0020 §6）里可以离线测的部分：路径、key、谓词闸门、模式解析。"""
 
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ def test_unknown_policy_falls_back_to_strict(parsed, monkeypatch) -> None:
 
 
 def test_local_parquet_reads_s3_directly(monkeypatch) -> None:
-    """s3 模式直接给 `s3://` 地址：多主机不需要本地缓存目录（ADR-0018 §6）。"""
+    """s3 模式直接给 `s3://` 地址：多主机不需要本地缓存目录（ADR-0020 §6）。"""
     monkeypatch.setattr(duck, "cache_mode", lambda: "s3")
     monkeypatch.setattr(duck, "config", _StubConfig({"xlsx.cache_prefix": "xlsx-derived"}))
     monkeypatch.setattr(duck.blobs, "bucket", lambda: "bench")

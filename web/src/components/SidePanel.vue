@@ -4,7 +4,7 @@ import * as api from "../api/endpoints";
 import { useChat } from "../stores/chat";
 
 const chat = useChat();
-const tab = ref<"tasks" | "spaces" | "cron">("tasks");
+const tab = ref<"tasks" | "spaces" | "users" | "cron">("tasks");
 
 // ---------- 知识空间 ----------
 const spaceList = ref<api.Space[]>([]);
@@ -72,6 +72,49 @@ async function dropMember(identity: string) {
   }
 }
 
+// ---------- 账号（只有超管能看到这一栏）----------
+const adminUsers = ref<api.AdminUser[]>([]);
+const newUser = ref({ identity: "", display_name: "", password: "" });
+
+async function loadUsers() {
+  adminUsers.value = (await api.users()).users;
+}
+
+async function addUser() {
+  notice.value = "";
+  try {
+    await api.createUser({ ...newUser.value, is_super: false });
+    newUser.value = { identity: "", display_name: "", password: "" };
+    await loadUsers();
+    notice.value = "已创建";
+  } catch (e) {
+    notice.value = (e as Error).message;
+  }
+}
+
+async function resetUserPassword(identity: string) {
+  const password = prompt(`给 ${identity} 设置新密码（至少 8 位）`);
+  if (!password) return;
+  notice.value = "";
+  try {
+    await api.resetPassword(identity, password);
+    notice.value = `已重置 ${identity} 的密码`;
+  } catch (e) {
+    notice.value = (e as Error).message;
+  }
+}
+
+async function removeUser(identity: string) {
+  if (!confirm(`删除账号 ${identity}？`)) return;
+  notice.value = "";
+  try {
+    await api.deleteUser(identity);
+    await loadUsers();
+  } catch (e) {
+    notice.value = (e as Error).message;
+  }
+}
+
 // ---------- 定时任务 ----------
 const crons = ref<api.Cron[]>([]);
 const newCron = ref({ prompt: "", schedule: "0 9 * * *" });
@@ -120,6 +163,7 @@ onMounted(async () => {
 watch(tab, (t) => {
   if (t === "cron") void loadCrons();
   if (t === "spaces") void loadSpaces();
+  if (t === "users") void loadUsers();
 });
 
 const taskList = computed(() => Object.values(chat.tasks));
@@ -142,6 +186,7 @@ async function stop(taskId: string) {
     <div class="tabs">
       <button :class="{ active: tab === 'tasks' }" @click="tab = 'tasks'">任务 {{ taskList.length }}</button>
       <button :class="{ active: tab === 'spaces' }" @click="tab = 'spaces'">知识库</button>
+      <button v-if="chat.isSuper" :class="{ active: tab === 'users' }" @click="tab = 'users'">用户</button>
       <button :class="{ active: tab === 'cron' }" @click="tab = 'cron'">定时</button>
     </div>
 
@@ -207,6 +252,30 @@ async function stop(taskId: string) {
             <button class="primary tiny" style="margin-top: 6px" @click="submitAssign">分配</button>
           </div>
         </template>
+      </template>
+
+      <!-- 账号（超管） -->
+      <template v-else-if="tab === 'users'">
+        <div v-for="u in adminUsers" :key="u.identity" class="card">
+          <div class="row" style="justify-content: space-between">
+            <h4>{{ u.identity }}</h4>
+            <span class="badge">{{ u.is_super ? "超级用户" : "普通用户" }}</span>
+          </div>
+          <div class="meta">{{ u.display_name }}</div>
+          <div class="row" style="margin-top: 6px">
+            <button class="tiny ghost" @click="resetUserPassword(u.identity)">重置密码</button>
+            <button v-if="u.identity !== chat.identity" class="tiny ghost" @click="removeUser(u.identity)">删除</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h4>新建账号</h4>
+          <input v-model="newUser.identity" placeholder="账号（字母/数字/下划线）" />
+          <input v-model="newUser.display_name" placeholder="显示名（10 字以内）" style="margin-top: 6px" />
+          <input v-model="newUser.password" type="password" placeholder="初始密码（至少 8 位）" style="margin-top: 6px" />
+          <button class="primary tiny" style="margin-top: 6px" @click="addUser">创建</button>
+          <p class="muted" style="margin: 6px 0 0">建完再到「知识库」把空间分配给他。</p>
+        </div>
       </template>
 
       <!-- 定时任务 -->

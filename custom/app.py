@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await outbox_dispatcher.stop()
-        # 图侧登记的退出清理（Mirage Workspace 池，ADR-0018）：不关会留下未关闭的 aiohttp 连接
+        # 图侧登记的退出清理（Mirage Workspace 池，ADR-0020）：不关会留下未关闭的 aiohttp 连接
         await lifecycle.close_all()
 
 

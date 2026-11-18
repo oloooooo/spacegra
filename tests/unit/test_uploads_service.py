@@ -1,4 +1,4 @@
-"""上传服务里不碰 IO 的那部分：文件名校验与单文件大小上限（ADR-0018）。
+"""上传服务里不碰 IO 的那部分：文件名校验与单文件大小上限（ADR-0020）。
 
 真正的写路径（`save_upload`）要对象存储 + PG，留到 e2e；这里只钉住两条安全底线：
 路径分隔符必须被拒（否则 key 会逃出 `uploads/<owner>/<thread>/`），以及表格与普通文件
@@ -162,7 +162,7 @@ class TestOverwriteRollback:
 
 
 class TestConvertTable:
-    """上传期同步转换的粘合层（ADR-0018）：把 duck 的失败翻译成带状态码的 UploadError。"""
+    """上传期同步转换的粘合层（ADR-0020）：把 duck 的失败翻译成带状态码的 UploadError。"""
 
     async def test_reuses_existing_derived(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from graphs.tools.xlsx import duck

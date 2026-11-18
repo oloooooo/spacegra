@@ -3,13 +3,13 @@
 **ADR 编号永不复用**：代码注释里写着 `ADR-0013` 这类编号，改布局、合文档都不改号——
 要查某条决定，先在这张表里按编号找文件。
 
-- 本目录：**仍然约束当前代码**的决定（10 篇）
+- 本目录：**仍然约束当前代码**的决定（12 篇）
 - [`archive/`](./archive/)：历史决定（6 篇）——被取代、或已被实现固化/被别处文档覆盖
 
 状态行是唯一必须跟着代码更新的字段；ADR 正文里的模块路径、env 名、行号都是**当时的布局**，
 别照着找文件（当前布局见 [`../../CONTEXT.md`](../../CONTEXT.md) 的「代码布局」）。
 
-## 现行（10）
+## 现行（12）
 
 | # | 决定 | 一句话 | 代码落点 |
 |---|---|---|---|
@@ -22,7 +22,9 @@
 | [0014](./0014-no-hitl-for-eval.md) | 不做 eval 的 HITL 审批 | 子任务只支持取消与状态通知；取消不占发件箱行、不唤醒主管 | `custom/api/tasks.py`、`graphs/middleware/async_task_guard.py` |
 | [0016](./0016-spaces-in-object-storage.md) | 空间知识进 S3 | `okf.backend: local\|s3` 二选一，`s3` 读本地镜像（不重写 14 个 backend 方法） | `shared/knowledge/root.py`、`scripts/okf_{push,pull}_s3.py` |
 | [0017](./0017-local-backend-scandir.md) | 本地 backend 一趟 scandir | 每次调用只 `resolve` 一次、`os.scandir` 枚举、不跟符号链接；`glob` 快 50×、`grep` 仍交给 ripgrep | `graphs/access/local_backend.py` |
-| [0018](./0018-uploads-and-reads-through-mirage.md) | 上传重建：对象存储是唯一真相，读路径全走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 两个前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；上传仍 boto3 直写，台账只做归属与 `target_agent` | `graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
+| [0018](./0018-no-self-registration.md) | 不做自助注册 | 只有用户表为空时能建第一个账号（即超管，pg advisory 事务锁防并发），之后账号全由超管开 | `custom/api/account.py`、`custom/service/account.py` |
+| [0019](./0019-login-rate-limiting.md) | 登录限流两层 | 账号连续 5 次失败锁 300 秒存库；IP 的失败次数进 Redis 滑动窗口（IP+账号 10 / IP 30，窗口 600s） | `custom/db/models.py`、`custom/service/login_limits.py`、`custom/api/account.py` |
+| [0020](./0020-uploads-and-reads-through-mirage.md) | 上传重建：对象存储是唯一真相，读路径全走 Mirage | `uploads/<owner>/<thread>/` + `okf/` 两个前缀；每 run 一个 Mirage Workspace（TTL 池），可见性用 profile 白名单，不继承 `SandboxBackendProtocol`；上传仍 boto3 直写，台账只做归属与 `target_agent` | `graphs/access/mirage_backend.py`、`graphs/xlsx_agent.py`、`custom/api/uploads.py`、`custom/service/uploads.py`、`shared/session/upload_rule.py` |
 
 ## 已归档（6）
 
@@ -43,6 +45,8 @@
 | 子任务结果怎么回到主管、为什么不会投两次 | 0010（+ 0014 讲"取消不是结果"） |
 | 前端怎么看子任务进度、为什么不能直连 | 0007（+ 0014） |
 | 空间知识放哪、多副本怎么读同一份 | 0016 |
-| 上传文件放哪、agent 怎么读、谁能看见谁 | 0018 |
+| 上传文件放哪、agent 怎么读、谁能看见谁 | 0020 |
 | 账号能开多少会话 | 0012 |
+| 账号从哪来、为什么没有注册 | 0018 |
+| 登录为什么会被锁、几次就锁、锁了谁能解 | 0019 |
 | 部署成多副本要注意什么 | [`../configuration.md`](../configuration.md) §3.1（原 0009） |

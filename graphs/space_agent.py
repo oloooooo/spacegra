@@ -45,7 +45,7 @@ def _space_of(config: RunnableConfig) -> str:
 
 
 def space_backend(config_: RunnableConfig):  # noqa: ANN201 —— 两种 backend 之一
-    """子 agent 的只读 backend：本地磁盘按 space 隔离（ADR-0005）或 Mirage（ADR-0018）。
+    """子 agent 的只读 backend：本地磁盘按 space 隔离（ADR-0005）或 Mirage（ADR-0020）。
 
     Mirage 模式下 profile = `hide "/" + show /<space> + /uploads`：空间看不见同级空间，
     但能读父会话上传的文件（upload_scope 从拦截层转发的 upload_owner/upload_thread 取）。

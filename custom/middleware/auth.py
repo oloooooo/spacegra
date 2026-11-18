@@ -123,7 +123,7 @@ async def _cascade_child_threads(ctx, value):
         owner = await session.scalar(select(ThreadORM.user_id).where(ThreadORM.thread_id == thread_id))
         if owner is None or (owner != ctx.user.identity and "write" not in (ctx.permissions or [])):
             return None  # 交给原生接口去 404/拒绝，这里不动任何东西
-        # 会话文件（ADR-0018）：表格派生按台账里的内容指纹整组删。派生可重建，所以
+        # 会话文件（ADR-0020）：表格派生按台账里的内容指纹整组删。派生可重建，所以
         # 先删它、后删线程：万一原生删除失败，代价只是下次查询重转一遍。原件前缀
         # 仍在 uploads/<owner>/<thread>/ 下，由 scripts/reap_upload_orphans.py 回收。
         shas = list(

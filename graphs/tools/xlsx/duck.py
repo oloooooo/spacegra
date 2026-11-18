@@ -1,4 +1,4 @@
-"""xlsx → Parquet 派生缓存 + DuckDB 查询（ADR-0018 §3、§6）。
+"""xlsx → Parquet 派生缓存 + DuckDB 查询（ADR-0020 §3、§6）。
 
 为什么要有这一层
 ----------------
@@ -236,7 +236,7 @@ def _connect(extra_dirs: Collection[Path] = ()):  # noqa: ANN202 —— duckdb �
         _configure_s3(con)
     else:
         # 顺序不能换：``enable_external_access=false`` 之后 allowed_directories 就改不了了，
-        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0018 §10）。源文件目录也要
+        # 而关掉外部访问后它仍是唯一还能读的目录（ADR-0020 §10）。源文件目录也要
         # 显式加进来：`read_xlsx` 由 DuckDB 自己读文件，不是 Python 读的。
         dirs = [_derived_dir(), *extra_dirs]
         allowed = ", ".join(_literal(path.resolve().as_posix()) for path in dirs)

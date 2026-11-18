@@ -1,4 +1,4 @@
-"""上传：字节进对象存储，元数据进 `session_object`（ADR-0018）。**本函数自己 commit**。
+"""上传：字节进对象存储，元数据进 `session_object`（ADR-0020）。**本函数自己 commit**。
 
 两本账的分工：对象存储是真相（key = ``uploads/<owner>/<thread>/<文件名>``），
 `session_object` 行回答"这个会话里有哪些文件、该派给谁"。**读路径不查这张表**

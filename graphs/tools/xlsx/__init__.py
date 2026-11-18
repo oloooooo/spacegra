@@ -19,7 +19,7 @@ agent 视角::
 为什么必须先物化：80k×10×3 的表现在一次全读 41.7 s，转成列式文件后 `WHERE … LIMIT 200`
 是 2 ms。派生缓存放本机还是对象存储由 `xlsx.cache_mode` 决定（`s3` 模式查询直接读
 对象存储，多实例不必共享磁盘）；它是可重建的中间产物，不是真相——删了只会让下次
-查询多解析一遍（ADR-0018 §8）。
+查询多解析一遍（ADR-0020 §8）。
 """
 
 import asyncio
@@ -87,7 +87,7 @@ def _check_scope(path: str | Path, config: object) -> None:
 
 
 def _mirage_mode() -> bool:
-    """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0018。"""
+    """读文件走 Mirage（对象存储）还是本地磁盘（`okf.backend`）。见 ADR-0020。"""
     return app_config.backend_mode() == "s3fs"
 
 

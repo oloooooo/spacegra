@@ -16,9 +16,20 @@ export const clearToken = () => {
 };
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** 限流锁定：还要等多少秒（后端 Retry-After），0 表示不是限流 */
+    public retryAfter = 0,
+  ) {
     super(message);
   }
+}
+
+function retryAfterSeconds(res: Response): number {
+  const raw = res.headers.get("retry-after");
+  const seconds = raw ? Number(raw) : 0;
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 0;
 }
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -41,23 +52,24 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: authHeaders({ "Content-Type": "application/json", ...(init.headers as Record<string, string>) }),
   });
-  return unwrap<T>(res);
+  return unwrap<T>(res, path);
 }
 
 /** multipart 上传：Content-Type 交给浏览器（要带 boundary），其余同 api()。 */
 export async function apiForm<T>(path: string, form: FormData): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { method: "POST", body: form, headers: authHeaders() });
-  return unwrap<T>(res);
+  return unwrap<T>(res, path);
 }
 
-async function unwrap<T>(res: Response): Promise<T> {
+async function unwrap<T>(res: Response, path: string): Promise<T> {
   if (res.status === 401) {
     clearToken();
-    throw new ApiError(401, "登录已过期，请重新登录");
+    // 登录接口的 401 是“账号或密码错误”，别改写成“登录已过期”
+    throw new ApiError(401, path.endsWith("/login") ? "账号或密码错误" : "登录已过期，请重新登录");
   }
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError(res.status, errorText(res.status, body, res.statusText));
+  if (!res.ok) throw new ApiError(res.status, errorText(res.status, body, res.statusText), retryAfterSeconds(res));
   return body as T;
 }
 
