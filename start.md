@@ -118,6 +118,66 @@ psql -h localhost -U postgres -d aegra -c "UPDATE user_tables SET is_super = tru
 
 登录接口字段是 `identity` / `password`（不是 `username`）：`POST /custom/login`。
 
+### 0.8 DuckDB 扩展（excel / httpfs）
+
+表格查询用 DuckDB，需要两个扩展：`excel`（`read_xlsx`，**两条线都要**，上传时转换就用到）和 `httpfs`（读 `s3://`，只有 S3 线要）。
+
+先看现状：
+
+```cmd
+.venv\Scripts\python.exe -c "import duckdb; print(duckdb.__version__); print(duckdb.connect().execute('PRAGMA platform').fetchone()); print([r for r in duckdb.connect().execute('select extension_name, installed, loaded from duckdb_extensions()').fetchall() if r[1]])"
+```
+
+已安装的会出现在列表里（例如 `('windows_amd64',)` + `[('excel', True, False), ('httpfs', True, False), …]`）。缺了就在联网机器上装一次：
+
+```cmd
+.venv\Scripts\python.exe -c "import duckdb; duckdb.connect().execute('INSTALL excel'); duckdb.connect().execute('INSTALL httpfs')"
+```
+
+**离线 / 内网**：直接从官方仓库下 `.gz`，解压放到标准目录。网址模板（`{版本}` 是 `duckdb.__version__`，`{平台}` 是 `PRAGMA platform`）：
+
+```
+https://extensions.duckdb.org/v{版本}/{平台}/{扩展名}.duckdb_extension.gz
+```
+
+已逐个验证可下载（HTTP 200，duckdb **2.0.0**）：
+
+| 平台 | excel | httpfs |
+|---|---|---|
+| `windows_amd64` | <https://extensions.duckdb.org/v2.0.0/windows_amd64/excel.duckdb_extension.gz> | <https://extensions.duckdb.org/v2.0.0/windows_amd64/httpfs.duckdb_extension.gz> |
+| `linux_amd64` | <https://extensions.duckdb.org/v2.0.0/linux_amd64/excel.duckdb_extension.gz> | <https://extensions.duckdb.org/v2.0.0/linux_amd64/httpfs.duckdb_extension.gz> |
+
+换 duckdb 版本时把 `v2.0.0` 换掉即可；平台名以 `PRAGMA platform` 为准（`linux_amd64_gcc4` 这种老名字在 2.0.0 上是 **404**；arm 机器用 `linux_arm64`、苹果用 `osx_amd64`/`osx_arm64`，`curl -I` 一看就知道真假）。
+
+落盘位置（`LOAD excel` 只从这里找）：
+
+```
+Windows  %USERPROFILE%\.duckdb\extensions\v<版本>\<平台>\<扩展名>.duckdb_extension
+Linux    ~/.duckdb/extensions/v<版本>/<平台>/<扩展名>.duckdb_extension
+```
+
+一步到位（Windows / cmd；**用 `curl`，不要用 python 的 urllib，后者对 extension 源返回 403**）：
+
+```cmd
+set VER=2.0.0&& set PLAT=windows_amd64&& set DIR=%USERPROFILE%\.duckdb\extensions\v%VER%\%PLAT%
+mkdir "%DIR%" 2>nul
+for %e in (excel httpfs) do curl -sSL -o "%DIR%\%e.duckdb_extension.gz" https://extensions.duckdb.org/v%VER%/%PLAT%/%e.duckdb_extension.gz
+.venv\Scripts\python.exe -c "import gzip,glob,os,shutil;[shutil.copyfileobj(gzip.open(f,'rb'),open(f[:-3],'wb')) for f in glob.glob(os.path.expanduser(r'~/.duckdb/extensions/v*/*/*.duckdb_extension.gz'))]"
+```
+
+Linux / bash：
+
+```bash
+VER=2.0.0; PLAT=linux_amd64
+DIR="$HOME/.duckdb/extensions/v$VER/$PLAT"
+mkdir -p "$DIR"
+for e in excel httpfs; do curl -fsSL -o "$DIR/$e.duckdb_extension.gz" "https://extensions.duckdb.org/v$VER/$PLAT/$e.duckdb_extension.gz"; done
+gunzip -f "$DIR"/*.duckdb_extension.gz
+ls "$DIR"   # excel.duckdb_extension  httpfs.duckdb_extension
+```
+
+注意：扩展按 **duckdb 版本** 分目录，升级 `duckdb` 之后要重装一遍；缺 `excel` 时 `duck.py` 会抛「缺少 DuckDB 的 excel 扩展」并附原始错误。验证方式不变：`select extension_name, installed from duckdb_extensions()`。
+
 ---
 
 ## 1. S3 线（分支 `mirage-s3`）
