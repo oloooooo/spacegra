@@ -1,6 +1,3 @@
-from typing import Optional
-
-from openai import organization
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,20 +19,29 @@ class UserRepository:
         stmt = select(UserTables.identity).where(UserTables.identity == identity)
         return (await self.session.execute(stmt)).scalar() is not None
 
+    async def count(self) -> int:
+        return int((await self.session.execute(select(func.count()).select_from(UserTables))).scalar_one())
+
+    async def list_all(self) -> list[UserTables]:
+        stmt = select(UserTables).order_by(UserTables.identity)
+        return list((await self.session.execute(stmt)).scalars().all())
+
     async def create(
         self,
         identity: str,
         display_name: str,
         hashed_password: str,
-        org_id: Optional[str] = None,
-        email: Optional[str] = None,
+        org_id: str | None = None,
+        email: str | None = None,
+        is_super: bool = False,
     ) -> UserTables:
         user = UserTables(
             identity=identity,
             display_name=display_name,
             hashed_password=hashed_password,
             org_id=org_id,
-            email=email
+            email=email,
+            is_super=is_super,
         )
         self.session.add(user)
         await self.session.commit()
@@ -44,14 +50,15 @@ class UserRepository:
 
     async def update_password(self, identity: str, hashed_password: str) -> bool:
         """更新密码哈希，返回是否命中行。"""
-        stmt = (
-            update(UserTables)
-            .where(UserTables.identity == identity)
-            .values(hashed_password=hashed_password)
-        )
+        stmt = update(UserTables).where(UserTables.identity == identity).values(hashed_password=hashed_password)
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount > 0  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def save(self, user: UserTables) -> None:
+        """落库内存里改过的字段（登录失败计数 / 锁定时间 / 改密后的哈希）。"""
+        self.session.add(user)
+        await self.session.commit()
 
     async def delete(self, identity: str) -> bool:
         """删除账号，返回是否命中行。"""
@@ -81,9 +88,7 @@ class SpaceRepository:
     async def create(self, name: str, path: str) -> Space:
         """幂等创建：同名已存在时直接返回既有行（不抛 IntegrityError）。"""
         await self.session.execute(
-            pg_insert(Space)
-            .values(name=name, path=path)
-            .on_conflict_do_nothing(index_elements=[Space.name])
+            pg_insert(Space).values(name=name, path=path).on_conflict_do_nothing(index_elements=[Space.name])
         )
         await self.session.commit()
         space = await self.get(name)
@@ -123,27 +128,17 @@ class UserSpaceRepository:
 
     async def list_by_user(self, identity: str) -> list[str]:
         """该用户可访问的微服务空间名。"""
-        stmt = (
-            select(UserSpace.space_name)
-            .where(UserSpace.identity == identity)
-            .order_by(UserSpace.space_name)
-        )
+        stmt = select(UserSpace.space_name).where(UserSpace.identity == identity).order_by(UserSpace.space_name)
         return list((await self.session.execute(stmt)).scalars().all())
 
     async def list_by_space(self, space_name: str) -> list[UserSpace]:
-        stmt = (
-            select(UserSpace)
-            .where(UserSpace.space_name == space_name)
-            .order_by(UserSpace.identity)
-        )
+        stmt = select(UserSpace).where(UserSpace.space_name == space_name).order_by(UserSpace.identity)
         return list((await self.session.execute(stmt)).scalars())
 
     async def create(self, identity: str, space_name: str) -> UserSpace:
         """幂等分配：已关联时返回既有行，重复调用不报错。"""
         await self.session.execute(
-            pg_insert(UserSpace)
-            .values(identity=identity, space_name=space_name)
-            .on_conflict_do_nothing()
+            pg_insert(UserSpace).values(identity=identity, space_name=space_name).on_conflict_do_nothing()
         )
         await self.session.commit()
         link = await self.get(identity, space_name)
@@ -160,6 +155,7 @@ class UserSpaceRepository:
         await self.session.commit()
         return result.rowcount > 0  # pyright: ignore[reportAttributeAccessIssue]
 
+
 class ThreadQuotaRepository:
     """主管线程的配额与级联清理（ADR-0012）。
 
@@ -173,17 +169,19 @@ class ThreadQuotaRepository:
 
     async def count_owned(self, identity: str) -> int:
         """该用户当前拥有的主管线程数。"""
-        stmt = select(func.count()).select_from(ThreadORM).where(
-            ThreadORM.metadata_json["owner_identity"].astext == identity,
-            ThreadORM.metadata_json["parent_thread_id"].astext.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(ThreadORM)
+            .where(
+                ThreadORM.metadata_json["owner_identity"].astext == identity,
+                ThreadORM.metadata_json["parent_thread_id"].astext.is_(None),
+            )
         )
         return int((await self.session.execute(stmt)).scalar_one())
 
     async def list_children(self, parent_thread_id: str) -> list[str]:
         """某个主管线程名下的子线程 id（**只查不删**，顺序由调用方控）。"""
-        stmt = select(ThreadORM.thread_id).where(
-            ThreadORM.metadata_json["parent_thread_id"].astext == parent_thread_id
-        )
+        stmt = select(ThreadORM.thread_id).where(ThreadORM.metadata_json["parent_thread_id"].astext == parent_thread_id)
         return list((await self.session.execute(stmt)).scalars())
 
     async def delete_threads(self, thread_ids: list[str]) -> None:

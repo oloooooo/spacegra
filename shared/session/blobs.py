@@ -106,7 +106,7 @@ def blob_key(owner: str, thread_id: str, sha256: str, name: str) -> str:
 
 
 def upload_prefix(owner: str, thread_id: str) -> str:
-    """一个会话的上传目录前缀；Mirage 的 `/uploads` 就挂在这里（ADR-0018）。
+    """一个会话的上传目录前缀；Mirage 的 `/uploads` 就挂在这里（ADR-0020）。
 
     owner/thread 直接进 key（不像 `session_prefix` 那样摘要）：前缀要能被人一眼读懂，
     而且这个前缀同时是 S3 mount 的 `key_prefix`，摘要会让人对不上号。

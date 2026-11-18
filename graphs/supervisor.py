@@ -127,9 +127,9 @@ def graph(config: RunnableConfig):  # noqa: ANN201 — 返回编译后的图
         model=model,
         system_prompt=MAIN_SYSTEM_PROMPT,
         # xlsx 工具不在主 agent 手里：主 agent 能看见所有上传文件，但表格分析一律派给
-        # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0018。
+        # `xlsx` 子 agent（它的 profile 只 show /uploads）。ADR-0020。
         tools=[*MAIN_TOOLS],
-        # 按空间隔离的 backend（ADR-0005 / ADR-0018）
+        # 按空间隔离的 backend（ADR-0005 / ADR-0020）
         backend=backend,
         context_schema=deepAgentContext,
         # 拆任务清单（write_todos）；guard 拦截 start/update_async_task：按 spec 绑定的

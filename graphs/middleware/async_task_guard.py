@@ -231,7 +231,7 @@ class AsyncTaskGuard(AgentMiddleware):
             all_spaces = allowed_spaces(cfg)
             user_spaces = None if all_spaces is None else sorted(all_spaces)
         # upload_owner / upload_thread：子 run 的上传目录用父会话的，否则子 agent 看不见
-        # 用户在父会话里传的文件（owner 是服务账号、线程是子线程）。ADR-0018。
+        # 用户在父会话里传的文件（owner 是服务账号、线程是子线程）。ADR-0020。
         return {
             "configurable": {
                 "user_spaces": user_spaces,

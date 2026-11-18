@@ -1,4 +1,4 @@
-"""`/uploads` 目录的只读 backend（本地目录版，ADR-0018 §9）。
+"""`/uploads` 目录的只读 backend（本地目录版，ADR-0020 §9）。
 
 上传字节就落在 `data/uploads/<owner>/<thread>/`（`shared.session.uploads`），所以 agent
 侧只有一套读法：`LocalBackend` 挂在 `/uploads/` 路由上，知识空间留在默认 backend。

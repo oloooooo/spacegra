@@ -1,4 +1,4 @@
-"""`/uploads` 的本地 backend（ADR-0018 §9）：路由、只读、会话隔离。"""
+"""`/uploads` 的本地 backend（ADR-0020 §9）：路由、只读、会话隔离。"""
 
 from __future__ import annotations
 

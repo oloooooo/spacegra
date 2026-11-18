@@ -1,4 +1,4 @@
-"""上传：字节进本地目录，元数据进 `session_object`（ADR-0018）。**本函数自己 commit**。
+"""上传：字节进本地目录，元数据进 `session_object`（ADR-0020）。**本函数自己 commit**。
 
 两本账的分工：本地盘是真相（`data/uploads/<owner>/<thread>/<文件名>`，台账里记相对 key），
 `session_object` 行回答"这个会话里有哪些文件、该派给谁"。**读路径不查这张表**

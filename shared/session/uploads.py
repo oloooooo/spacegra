@@ -1,4 +1,4 @@
-"""上传文件的介质层：字节落在本地目录（ADR-0018 §9）。
+"""上传文件的介质层：字节落在本地目录（ADR-0020 §9）。
 
 两本账的分工不变：**字节**在 `data/uploads/<owner>/<thread>/<name>`，**归属**在
 `session_object` 台账里。本模块只管"字节放哪、怎么取、怎么删"，不管鉴权与配额
@@ -66,7 +66,7 @@ def _inside(*parts: str) -> Path:
     """拼路径并断言没跑出 `local_root()`：读、写、删三个 sink 都从这里过。
 
     owner / thread / name 都可能来自客户端（注册的 identity、上传表单的 thread_id、
-    文件名），任何一段带分隔符或 `..` 都会把路径搬到根外（ADR-0018 §10）。
+    文件名），任何一段带分隔符或 `..` 都会把路径搬到根外（ADR-0020 §10）。
     """
     root = local_root()
     path = root.joinpath(*(safe_segment(part, limit=_MAX_SEGMENT) for part in parts)).resolve()

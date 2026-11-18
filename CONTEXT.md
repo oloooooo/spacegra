@@ -191,7 +191,7 @@ _Avoid_: 把它当成转发层（它同时是授权层：要求父线程属于�
 
 规则：`custom → shared`、`graphs → shared`，**两个包互不 import**；`shared` 不 import
 FastAPI / LangChain / deepagents。（上传功能移除后已无任何例外；旧的 xlsx→custom 懒加载已删。上传写路径在
-`custom/api/uploads.py`，读路径是 `graphs/access/uploads_backend.py` 里的 `/uploads` 路由，规则见 ADR-0018。）
+`custom/api/uploads.py`，读路径是 `graphs/access/uploads_backend.py` 里的 `/uploads` 路由，规则见 ADR-0020。）
 
 数据不在代码包里：空间知识在仓库根 `knowledge/`（`config.yaml` 的 `okf.dir`）。
 _Avoid_: 往 `graphs/` 里放数据；在 `custom/` 里放图侧要用的模块（要放就放 `shared/`）；

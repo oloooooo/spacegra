@@ -4,7 +4,7 @@ aegra.json 注册::
 
     "xlsx_agent": "./graphs/xlsx_agent.py:graph",
 
-为什么要单独一个图（ADR-0018）：
+为什么要单独一个图（ADR-0020）：
 
 - 主 agent 看得见所有上传文件，但**不做表格分析**（它手里没有 xlsx 工具），命中失败/越权的
   表格一律派给这里；

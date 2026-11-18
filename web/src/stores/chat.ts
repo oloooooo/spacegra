@@ -76,6 +76,13 @@ export const useChat = defineStore("chat", () => {
     await bootstrap();
   }
 
+  /** 首次访问：建超级用户并直接登录。 */
+  async function bootstrapSuperUser(id: string, displayName: string, password: string) {
+    const res = await api.bootstrapSuperUser({ identity: id, display_name: displayName, password });
+    setToken(res.access_token);
+    await bootstrap();
+  }
+
   async function bootstrap() {
     if (!getToken()) return;
     const me = await api.whoami();
@@ -325,6 +332,7 @@ export const useChat = defineStore("chat", () => {
     identity, permissions, isSuper, threads, threadId, messages, streaming, interrupts, tasks,
     activeTasks, running, error, currentRun,
     login, bootstrap, logout, loadThreads, openThread, refreshState, send, resume, cancel, cancelTask,
+    bootstrapSuperUser,
     removeThread, isAuthError,
   };
 });

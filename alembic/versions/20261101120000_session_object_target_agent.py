@@ -1,6 +1,6 @@
 """session_object 加 target_agent（上传时算好的投递目标）
 
-ADR-0018：文件落对象存储后，由谁处理（哪个空间 agent / 通用 xlsx agent / 主 agent）
+ADR-0020：文件落对象存储后，由谁处理（哪个空间 agent / 通用 xlsx agent / 主 agent）
 在上传那一刻就定下来，写进这一列；读路径不再用"当前空间集"重算，避免同一份文件
 因为上传者权限变化而被换个 agent 处理。
 

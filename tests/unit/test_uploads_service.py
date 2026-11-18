@@ -1,4 +1,4 @@
-"""上传服务的校验与写路径保护（ADR-0018）。
+"""上传服务的校验与写路径保护（ADR-0020）。
 
 前两节是不碰 IO 的纯函数；`TestOverwriteRollback` / `TestSaveUploadGuards` 用 fs 介质 + 假
 session 钉住失败路径：台账写不进去要换回旧字节，配额/超限/存储不可用要映射成 4xx/5xx。

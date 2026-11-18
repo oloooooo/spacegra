@@ -1,4 +1,4 @@
-"""上传入口：`POST /custom/uploads`（ADR-0018）。
+"""上传入口：`POST /custom/uploads`（ADR-0020）。
 
 一个端点收所有上传，按文件名决定谁处理（`shared.session.upload_rule.route_upload`）：
 `<空间名>_xxx.xlsx` → 那个空间的子 agent；其余 xlsx → 通用 `xlsx` 子 agent；

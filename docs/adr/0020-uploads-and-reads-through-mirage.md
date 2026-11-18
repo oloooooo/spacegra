@@ -140,7 +140,7 @@ xlsx 字节（download_bytes 已取到本地）──► 每 sheet 一个 Parque
    `CASE`、比较/逻辑运算、少数纯函数如 `date_part`/`starts_with`/`nullif`），**子查询、
    表函数、陌生函数一律拒**。`local` 模式另外关掉 `enable_external_access` 并把
    `allowed_directories` 限定到派生目录；`s3` 模式要直读对象存储，外部访问必须开着，此时注入面
-   全压在语法树白名单上（ADR-0018 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
+   全压在语法树白名单上（ADR-0020 §10）。`columns` 只按清单里的列名过滤，标识符统一 `_ident` 转义。
    DuckDB 没有 SQLite authorizer 那样的细粒度钩子，靠的就是这两层。
 
 清理：本机缓存按 `xlsx.cache_local_max_mb`（默认 2GB）按最久未改动淘汰；对象存储里的
