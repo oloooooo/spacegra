@@ -22,7 +22,7 @@ auth:
   # shared/token.py 与 graphs/access/spaces.py 共用这一个值，改了旧子线程属主就对不上。
   service_identity: subagent_service
   # 【只影响用户】access token 有效期（秒）。
-  # 登录/注册签发的用户 token 用它；子 agent 的服务 token 写死 10 年，不受此值影响。
+  # 登录/初始化签发的用户 token 用它；子 agent 的服务 token 写死 10 年，不受此值影响。
   access_token_ttl: 3600
 
 # --- 会话文件 md（shared/session/store.py）---

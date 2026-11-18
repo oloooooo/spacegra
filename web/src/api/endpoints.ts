@@ -45,6 +45,30 @@ export const login = (identity: string, password: string) =>
     body: JSON.stringify({ identity, password }),
   });
 
+/** 系统还没账号时（first_run）为 true，前端据此显示初始化表单而不是登录表单。 */
+export const firstRun = () => api<{ first_run: boolean }>("/custom/first-run");
+
+/** 第一次访问创建超级用户，返回的 token 等同登录。 */
+export const bootstrapSuperUser = (body: { identity: string; display_name: string; password: string }) =>
+  api<{ access_token: string; expires_in: number }>("/custom/bootstrap", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export type AdminUser = { identity: string; display_name: string; is_super: boolean };
+
+// 账号管理：只有超级用户能调（后端 require_super）
+export const users = () => api<{ users: AdminUser[] }>("/custom/users");
+export const createUser = (body: { identity: string; display_name: string; password: string; is_super: boolean }) =>
+  api<AdminUser>("/custom/users", { method: "POST", body: JSON.stringify(body) });
+export const resetPassword = (identity: string, password: string) =>
+  api<{ identity: string }>(`/custom/users/${encodeURIComponent(identity)}/password`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+export const deleteUser = (identity: string) =>
+  api<{ identity: string }>(`/custom/users/${encodeURIComponent(identity)}`, { method: "DELETE" });
+
 export const whoami = () => api<{ identity: string; display_name: string; permissions: string[] }>("/custom/whoami");
 export const mySpaces = () => api<{ space: string[]; message?: string }>("/custom/user/spaces");
 export const graphs = () => api<GraphList>("/custom/graphs");

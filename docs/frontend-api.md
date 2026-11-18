@@ -2,7 +2,7 @@
 
 前端（独立仓库，Vue 3 + Vite）对接本服务时的接口契约。全部结论来自**实测**（真起服务、跑 supervisor 与三个领域子 agent）。
 
-实现位置：`custom/api/`，一个 URL 域一个文件——`account.py`（注册 / 登录 / whoami）、`graphs.py`（图清单）、`spaces.py`（空间与文件树）、
+实现位置：`custom/api/`，一个 URL 域一个文件——`account.py`（初始化 / 登录 / whoami / 账号管理）、`graphs.py`（图清单）、`spaces.py`（空间与文件树）、
 `tasks.py`（任务状态 / SSE 流 / 取消）、`delivery.py`（投递 ack）；路由前缀都是 `/custom`。除了这一层，其余接口直接用 LangGraph 原生端点（见 §4）。
 
 另有 **3 个内部接口**：
@@ -26,18 +26,39 @@
 
 ## 2. 鉴权
 
-所有接口都要 `Authorization: Bearer <token>`，token 来自：
+**没有自助注册**：只有用户表为空时（第一次访问）能建出第一个账号，它自动是超级用户；
+之后所有账号由超级用户建（[ADR-0018](./adr/0018-no-self-registration.md)）。
 
 ```http
-POST /custom/login
-{"identity": "root", "password": "1234"}
+GET /custom/first-run
+200 {"first_run": true}          # false = 已初始化，前端显示登录表单
 
+POST /custom/bootstrap
+{"identity": "root", "display_name": "管理员", "password": "至少8位"}
+200 {"access_token": "...", "token_type": "bearer", "expires_in": 3600}
+
+POST /custom/bootstrap          # 第二次起
+403 {"detail": "系统已初始化，请直接登录"}
+
+POST /custom/login
+{"identity": "root", "password": "..."}
 200 {"access_token": "...", "token_type": "bearer", "expires_in": 3600}
 ```
 
+- 账号名：字母/数字/下划线 3-20 位；`subagent_service`（服务身份）与 `local` 是保留名，建不了。
+- 密码 8-72 字节；显示名 ≤10 字（`user_tables.display_name` 是 `String(10)`）。
 - token **1 小时**过期（`config.yaml` 的 `auth.access_token_ttl`），没有 refresh token；前端收到 401 就回登录页。
-- `permissions` 含 `write` 表示超级用户（`user_tables.is_super`），能建 Space、分配用户、看全部 Space。
+- `permissions` 含 `write` 表示超级用户（`user_tables.is_super`），能建 Space、分配用户、看全部 Space、管理账号。
 - 当前身份：`GET /custom/whoami`；自己的空间：`GET /custom/user/spaces`。
+
+### 2.1 超级用户管账号（都要超管，普通用户 403）
+
+```http
+GET    /custom/users                    -> {"users": [{"identity", "display_name", "is_super"}]}
+POST   /custom/users  {"identity", "display_name", "password", "is_super": false}
+POST   /custom/users/{identity}/password  {"password"}      # 没有找回密码，只能超管重置
+DELETE /custom/users/{identity}                             # 不能删自己
+```
 
 ## 3. 本层接口
 

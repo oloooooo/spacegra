@@ -398,7 +398,7 @@ md 会话文件的 Store 载体。**main 已移除上传入口**，这一组键�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `JWT_SECRET` | **无（必填）** | HS256 签/验 access token。缺失 = 启动即 `KeyError: 'JWT_SECRET'` |
-| `PASSWORD_PEPPER` | **无（必填）** | 密码哈希前拼接的全局密文。改了这个值，已注册账号全部登不上（旧哈希不再匹配） |
+| `PASSWORD_PEPPER` | **无（必填）** | 密码哈希前拼接的全局密文。改了这个值，已有账号全部登不上（旧哈希不再匹配），需超管重置密码 |
 | `SESSION_SCOPE_SECRET` | `dev-session-scope` | ⚠ **当前代码已不读**：会话作用域随上传功能一起移除，仅历史部署保留此键 |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `dev` / `dev` | 对象存储凭证（SeaweedFS 未配 IAM 时任意值） |
 

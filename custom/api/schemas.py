@@ -1,7 +1,6 @@
-from ast import List
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Permission = Literal["read", "write"]
 
@@ -10,16 +9,26 @@ class MessagesBaseModel(BaseModel):
     message: str | None = None
 
 
-class RegisterRequest(BaseModel):
+class BootstrapRequest(BaseModel):
+    """首次访问时创建超级用户（只有用户表为空时接受）。"""
+
     identity: str
     display_name: str
-    org_id: str | None = None
-    email: str | None = None
-    password: str
+    password: str = Field(min_length=8)
 
 
-class RegisterResponse(MessagesBaseModel):
-    user_identity: str
+class CreateUserRequest(BootstrapRequest):
+    is_super: bool = False
+
+
+class ResetPasswordRequest(BaseModel):
+    password: str = Field(min_length=8)
+
+
+class UserOut(BaseModel):
+    identity: str
+    display_name: str
+    is_super: bool
 
 
 class LoginRequest(BaseModel):
