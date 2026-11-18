@@ -4,7 +4,10 @@
     "domain_agent": "./graphs/space_agent.py:graph"
   },
   "http": {
-    "app": "./custom/app.py:app"
+    "app": "./custom/app.py:app",
+    "cors": {
+      "expose_headers": ["Content-Location", "Location", "Retry-After", "X-Lock-Remaining"]
+    }
   },
   "auth": {
     "path": "./custom/middleware/auth.py:auth"

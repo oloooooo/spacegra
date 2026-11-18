@@ -55,6 +55,11 @@ class UserRepository:
         await self.session.commit()
         return result.rowcount > 0  # pyright: ignore[reportAttributeAccessIssue]
 
+    async def save(self, user: UserTables) -> None:
+        """落库内存里改过的字段（登录失败计数 / 锁定时间 / 改密后的哈希）。"""
+        self.session.add(user)
+        await self.session.commit()
+
     async def delete(self, identity: str) -> bool:
         """删除账号，返回是否命中行。"""
         stmt = delete(UserTables).where(UserTables.identity == identity)

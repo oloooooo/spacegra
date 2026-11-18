@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.models.auth import User
+from aegra_api.models.errors import get_error_type
 from custom.api.deps import get_session
 from custom.api.schemas import (
     BootstrapRequest,
@@ -30,6 +32,12 @@ from custom.service.account import (
     _check_password,
     _hash_password,
     _verify_password,
+)
+from custom.service.login_limits import (
+    check_login_rate_limit,
+    clear_login_failures,
+    extract_client_ip,
+    record_login_failure,
 )
 from shared.token import TOKEN_TTL, create_access_token
 
@@ -83,13 +91,65 @@ async def bootstrap(body: BootstrapRequest, session=Depends(get_session)) -> Tok
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, session=Depends(get_session)) -> TokenResponse:
+async def login(body: LoginRequest, request: Request, session=Depends(get_session)) -> TokenResponse | JSONResponse:
+    """密码登录。两层限流：IP 滑动窗口（429）+ 账号级锁定（403），见 ADR-0019。"""
+    ip = extract_client_ip(request)
+    allowed, retry_after = await check_login_rate_limit(ip, body.identity)
+    if not allowed:
+        return _rate_limited(429, "登录尝试过于频繁，请稍后再试", retry_after)
+
     repo = UserRepository(session)
     user = await repo.get(body.identity)
-    # 账号不存在与密码错误返回同一提示，避免账号枚举
-    if user is None or not _verify_password(body.password, user.hashed_password):
+    # 账号不存在与密码错误返回同一提示，避免账号枚举（未知账号也计一笔失败）
+    if user is None:
+        await record_login_failure(ip, body.identity)
         raise HTTPException(status_code=401, detail="账号或密码错误")
+
+    # 锁定中不验密码；到期后先清零，避免解锁后的第一次失误立刻又锁上
+    if user.is_login_locked():
+        return _locked(user)
+    if user.login_locked_until is not None:
+        user.reset_failed_login()
+        await repo.save(user)
+
+    if not _verify_password(body.password, user.hashed_password):
+        await record_login_failure(ip, body.identity)
+        user.increment_failed_login()
+        await repo.save(user)
+        if user.is_login_locked():
+            return _locked(user)
+        raise HTTPException(status_code=401, detail="账号或密码错误")
+
+    if user.login_failed_count or user.login_locked_until is not None:
+        user.reset_failed_login()
+        await repo.save(user)
+    await clear_login_failures(ip, body.identity)
     return _token(user.identity)
+
+
+def _locked(user) -> JSONResponse:
+    """锁定期的 403。"""
+    return _rate_limited(
+        403, f"由于多次登录失败，账户已被锁定 {user.lock_remaining_seconds()} 秒", user.lock_remaining_seconds()
+    )
+
+
+def _rate_limited(status: int, message: str, retry_after: int) -> JSONResponse:
+    """限流 / 锁定的错误响应。
+
+    自己造 JSONResponse 而不 raise HTTPException：aegra 的全局 HTTPException handler
+    重建响应时会漏掉 `exc.headers`，Retry-After 到不了浏览器（前端就没法倒计时）。
+    错误体保持 aegra 的 {error, message, details} 形状。
+    """
+    return JSONResponse(
+        status_code=status,
+        content={
+            "error": "too_many_requests" if status == 429 else get_error_type(status),
+            "message": message,
+            "details": None,
+        },
+        headers={"Retry-After": str(retry_after), "X-Lock-Remaining": str(retry_after)},
+    )
 
 
 @router.get("/whoami")

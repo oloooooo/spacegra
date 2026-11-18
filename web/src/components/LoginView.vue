@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import * as api from "../api/endpoints";
 import { useChat } from "../stores/chat";
 
@@ -11,6 +11,20 @@ const first = ref(false);
 const checked = ref(false);
 const busy = ref(false);
 const err = ref("");
+// 被限流/锁定时的倒计时（秒）：>0 时按钮禁用，每秒减一
+const lockedSeconds = ref(0);
+let countdown: ReturnType<typeof setInterval> | undefined;
+
+function startCountdown(seconds: number) {
+  lockedSeconds.value = seconds;
+  clearInterval(countdown);
+  countdown = setInterval(() => {
+    lockedSeconds.value -= 1;
+    if (lockedSeconds.value <= 0) clearInterval(countdown);
+  }, 1000);
+}
+
+onUnmounted(() => clearInterval(countdown));
 
 // 用户表为空 = 第一次访问：这时才允许建超级用户，之后这里只能登录
 onMounted(async () => {
@@ -34,6 +48,8 @@ async function submit() {
     }
   } catch (e) {
     err.value = (e as Error).message;
+    const wait = (e as { retryAfter?: number }).retryAfter ?? 0;
+    if (wait > 0) startCountdown(wait);
   } finally {
     busy.value = false;
   }
@@ -55,8 +71,18 @@ async function submit() {
         :placeholder="first ? '密码（至少 8 位）' : '密码'"
         autocomplete="current-password"
       />
-      <button class="primary" :disabled="busy || !checked">
-        {{ busy ? (first ? "初始化中…" : "登录中…") : first ? "创建超级用户" : "登录" }}
+      <button class="primary" :disabled="busy || !checked || lockedSeconds > 0">
+        {{
+          lockedSeconds > 0
+            ? `请等待 ${lockedSeconds} 秒`
+            : busy
+              ? first
+                ? "初始化中…"
+                : "登录中…"
+              : first
+                ? "创建超级用户"
+                : "登录"
+        }}
       </button>
       <p v-if="err" class="error" style="padding: 0">{{ err }}</p>
     </form>

@@ -43,7 +43,17 @@ POST /custom/bootstrap          # 第二次起
 POST /custom/login
 {"identity": "root", "password": "..."}
 200 {"access_token": "...", "token_type": "bearer", "expires_in": 3600}
+401 {"detail": "账号或密码错误"}            # 账号不存在与密码错同一种回复
+403 {"error": "forbidden", "message": "由于多次登录失败，账户已被锁定 N 秒"}
+   头：Retry-After: N、X-Lock-Remaining: N
+429 {"error": "too_many_requests", "message": "登录尝试过于频繁，请稍后再试"}
+   头：Retry-After: N
 ```
+
+- 登录限流（[ADR-0019](./adr/0019-login-rate-limiting.md)）：**同一账号**连续错 5 次锁 300 秒
+  （锁定期不验密码，403）；**同一 IP** 在 600 秒窗口内 `IP+账号` 错 10 次或 `IP` 共错 30 次
+  就 429。两个头都要在前端读（`ApiError.retryAfter`），登录按钮按它倒计时。
+  浏览器要能读到这两个头，`aegra.json` 的 `http.cors.expose_headers` 已列上。
 
 - 账号名：字母/数字/下划线 3-20 位；`subagent_service`（服务身份）与 `local` 是保留名，建不了。
 - 密码 8-72 字节；显示名 ≤10 字（`user_tables.display_name` 是 `String(10)`）。

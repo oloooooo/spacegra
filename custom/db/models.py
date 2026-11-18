@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import (
     BigInteger,
@@ -19,33 +19,58 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aegra_api.core.orm import Base
 
+# 登录失败锁定（ADR-0019）：连续失败 MAX_LOGIN_FAILED_ATTEMPTS 次，锁 LOGIN_LOCK_DURATION_SECONDS 秒
+MAX_LOGIN_FAILED_ATTEMPTS = 5
+LOGIN_LOCK_DURATION_SECONDS = 300
+
 
 class UserTables(Base):
     """账号 / 密码哈希"""
 
     __tablename__ = "user_tables"
 
-    identity: Mapped[str] = mapped_column(
-        String(50), index=True, unique=True, comment="登录账号", primary_key=True
-    )
+    identity: Mapped[str] = mapped_column(String(50), index=True, unique=True, comment="登录账号", primary_key=True)
     display_name: Mapped[str] = mapped_column(
         String(10),
         index=True,
         comment="用户名",
     )
-    org_id: Mapped[str | None] = mapped_column(
-        String(50), comment="组织名", default=None
-    )
-    email: Mapped[str | None] = mapped_column(
-        String(80), comment="邮箱名", default=None
-    )
+    org_id: Mapped[str | None] = mapped_column(String(50), comment="组织名", default=None)
+    email: Mapped[str | None] = mapped_column(String(80), comment="邮箱名", default=None)
 
     hashed_password: Mapped[str] = mapped_column(String(100), comment="bcrypt 哈希")
     is_super: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=false(), comment="超级用户，只能直接改库"
+        Boolean, default=False, server_default=false(), comment="超级用户，只能直接改库（bootstrap 或超管开号）"
     )
+    # 登录失败锁定（ADR-0019）：计数与锁定时间都在库里，多副本共享；成功后清零
+    login_failed_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0"), comment="连续登录失败次数"
+    )
+    last_failed_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="最后一次登录失败时间")
+    login_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="登录锁定到期时间")
     # 只读视图：带权限的关联走 UserSpace，写入请直接操作它
     spaces: Mapped[list[Space]] = relationship(secondary="user_space", viewonly=True)
+
+    def is_login_locked(self) -> bool:
+        return self.login_locked_until is not None and datetime.now(UTC) < self.login_locked_until
+
+    def lock_remaining_seconds(self) -> int:
+        """还剩多少秒解锁；未锁定时为 0。"""
+        if self.login_locked_until is None:
+            return 0
+        return max(0, int((self.login_locked_until - datetime.now(UTC)).total_seconds()))
+
+    def increment_failed_login(self) -> None:
+        """失败 +1，达到阈值就锁一段时间（从这次失败开始算）。"""
+        self.login_failed_count += 1
+        self.last_failed_login = datetime.now(UTC)
+        if self.login_failed_count >= MAX_LOGIN_FAILED_ATTEMPTS:
+            self.login_locked_until = self.last_failed_login + timedelta(seconds=LOGIN_LOCK_DURATION_SECONDS)
+
+    def reset_failed_login(self) -> None:
+        self.login_failed_count = 0
+        self.last_failed_login = None
+        self.login_locked_until = None
 
     def __repr__(self) -> str:
         return f"<User {self.identity!r}>"
@@ -63,13 +88,9 @@ class Space(Base):
         comment="微服务空间名称，即知识空间下的文件夹名",
         primary_key=True,
     )
-    path: Mapped[str] = mapped_column(
-        String(512), comment="工作目录路径，相对项目根（服务启动时的 CWD）"
-    )
+    path: Mapped[str] = mapped_column(String(512), comment="工作目录路径，相对项目根（服务启动时的 CWD）")
     # 只读视图，写入走 UserSpace
-    users: Mapped[list[UserTables]] = relationship(
-        secondary="user_space", viewonly=True
-    )
+    users: Mapped[list[UserTables]] = relationship(secondary="user_space", viewonly=True)
 
     def __repr__(self) -> str:
         return f"<Space {self.name!r}>"
@@ -93,6 +114,7 @@ class UserSpace(Base):
 
     def __repr__(self) -> str:
         return f"<UserSpace {self.identity!r} -> {self.space_name!r}>"
+
 
 class AsyncTaskOutbox(Base):
     """后台任务结果的发件箱（ADR-0010，Transactional Outbox）。
@@ -154,12 +176,8 @@ class SessionObject(Base):
         primary_key=True,
         comment="上传者身份；与 thread_id 一起构成私有隔离前缀",
     )
-    thread_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="主管线程 id（= 会话），删会话即删"
-    )
-    name: Mapped[str] = mapped_column(
-        String(200), primary_key=True, comment="上传文件名，形如 <空间名>_<表名>.xlsx"
-    )
+    thread_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="主管线程 id（= 会话），删会话即删")
+    name: Mapped[str] = mapped_column(String(200), primary_key=True, comment="上传文件名，形如 <空间名>_<表名>.xlsx")
     space: Mapped[str] = mapped_column(
         String(100), comment="从文件名前缀解析出的空间名，只用于路由到子 agent 与展示，**不是**隔离键"
     )
