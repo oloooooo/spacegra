@@ -110,46 +110,50 @@ uv run alembic upgrade head
 
 ## 5. 初始化账号与知识空间
 
-`/custom/register` 只能注册**普通用户**，而「建空间 / 分配空间」需要超级用户。所以第一次要按下面顺序做：先注册账号，再用 SQL 提权并分配空间。
+`/custom/bootstrap` 只能在**用户表为空时**调一次，建出来的就是超级用户 `root`；之后再开号是超级用户的事（后端 `POST /custom/users`，前端右上角「用户」tab）。
 
 ### 5.1 先起服务（见 §6），然后在另一个终端：
 
 ```bash
-curl -X POST http://127.0.0.1:2026/custom/register \
+curl -X POST http://127.0.0.1:2026/custom/bootstrap \
   -H 'Content-Type: application/json' \
-  -d '{"identity":"root","display_name":"root","password":"1234"}'
-# → {"message":null,"user_identity":"root"}
+  -d '{"identity":"root","display_name":"root","password":"root12345"}'
+# → {"access_token":"<token>","expires_in":3600}
 ```
 
-### 5.2 提权 + 登记三个知识空间
+密码 8–72 字节、`display_name` 最多 10 字。这一步一次性：用户表非空时再调返回
+`403 系统已初始化，请直接登录`。
+
+### 5.2 登记三个知识空间
+
+用上一步拿到的 token（1 小时有效，过期重新 `POST /custom/login`）：
 
 ```bash
-psql -U postgres -d aegra <<'SQL'
--- 1) 超管（只有超管能建空间 / 分配空间）
-update user_tables set is_super = true where identity = 'root';
+TOKEN='<上一步的 access_token>'
 
--- 2) 登记知识空间（path 相对项目根，不是绝对路径）
-insert into space(name, path) values
-  ('cbam-reporting', 'knowledge/cbam-reporting'),
-  ('hybrid-bonding', 'knowledge/hybrid-bonding'),
-  ('sbol3-synbio',   'knowledge/sbol3-synbio')
-on conflict (name) do nothing;
-
--- 3) 把空间分配给 root（子 agent 只能看到派给它的那一个）
-insert into user_space(identity, space_name) values
-  ('root','cbam-reporting'),
-  ('root','hybrid-bonding'),
-  ('root','sbol3-synbio')
-on conflict do nothing;
-SQL
+for s in cbam-reporting hybrid-bonding sbol3-synbio; do
+  # 建空间 = 建一个子 agent：目录名同空间名，缺 AGENT.md 时补模板
+  curl -s -X POST http://127.0.0.1:2026/custom/spaces/create \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"space_name\":\"$s\"}"
+  # 分配给 root（子 agent 只能看到派给它的那一个）
+  curl -s -X POST "http://127.0.0.1:2026/custom/spaces/users/create?identity=root&space_name=$s" \
+    -H "Authorization: Bearer $TOKEN"
+done
 ```
+
+空间目录在知识空间根下（`knowledge/<name>/`），这三个目录仓库里本来就有。
+
+> 直接改库也行（老做法）：`insert into space(name, path) values ('cbam-reporting','knowledge/cbam-reporting') on conflict do nothing;`
+> 与 `insert into user_space(identity, space_name) values ('root','cbam-reporting');`——
+> 但不用再 `update user_tables set is_super = true`，bootstrap 建出来的就是超管。
 
 ### 5.3 验证
 
 ```bash
 curl -s -X POST http://127.0.0.1:2026/custom/login \
   -H 'Content-Type: application/json' \
-  -d '{"identity":"root","password":"1234"}'
+  -d '{"identity":"root","password":"root12345"}'
 # 拿到 access_token 后：
 curl -s http://127.0.0.1:2026/custom/whoami -H "Authorization: Bearer <token>"
 # → {"identity":"root", ..., "permissions":["read","write"]}
@@ -233,7 +237,7 @@ npm run dev          # http://localhost:5273
 ```
 
 - 默认连 `http://127.0.0.1:2026`，要改就 `cp .env.example .env` 后编辑 `VITE_API_BASE`。
-- 用 `root / 1234` 登录。
+- 用 §5.1 建的超管账号登录（示例是 `root / root12345`）。
 - 后端已开 CORS（`Access-Control-Allow-Origin: *`），前后端不同端口不需要代理配置。
 
 不想开浏览器、只想验证接口契约：
@@ -252,9 +256,12 @@ cd web && node scripts/smoke.mjs      # 20 个断言：登录→建会话→流�
 | `KeyError: 'JWT_SECRET'` / `'PASSWORD_PEPPER'` | `.env` 缺这两个键，补齐后重启 |
 | `RuntimeError: Database not initialized` | 用了 `get_session_maker()` 但没走服务生命周期；只在服务内可用 |
 | `psycopg_pool.PoolTimeout: couldn't get a connection` | PG 没起 / 连接数打满 / 密码错。先 `psql` 手动连一次确认 |
-| 登录 401「账号或密码错误」 | 账号没注册，或 `PASSWORD_PEPPER` 被改过 |
+| 登录 401「账号或密码错误」 | 账号不存在、密码错，或 `PASSWORD_PEPPER` 被改过 |
+| 登录 403「由于多次登录失败，账户已被锁定 N 秒」 | 连续 5 次密码错触发账号锁定，等 N 秒或让超管重置密码 |
+| 登录 429「登录尝试过于频繁，请稍后再试」 | 同一 IP/账号 10 分钟内失败太多次（Redis 滑动窗口），按 `Retry-After` 等 |
+| `POST /custom/bootstrap` 返 403「系统已初始化，请直接登录」 | 用户表已有账号；改走 `POST /custom/login` |
 | `用户没有空间 'xxx' 的权限，无法启动该子 agent` | 该账号没有这个 Space 的 `user_space` 行；按 §5.2 分配 |
-| 建空间接口 403「只有超级用户可以创建微服务空间」 | 账号 `is_super=false`；按 §5.2 提权 |
+| 建空间接口 403「只有超级用户可以创建微服务空间」 | 账号不是超管；用 bootstrap 建的第一个账号，或 `update user_tables set is_super = true` |
 | 前端登录后一片空白 | 后端没起 / `VITE_API_BASE` 指错；浏览器控制台看 `Failed to fetch` |
 | 改了 `graphs/` 下的图或 `aegra.json` 但没生效 | 后端启动时只读一次注册表，**重启服务** |
 | 子 agent 一直显示 `running` | 父 state 里的状态是快照（只在 check 时更新）。看真实状态用 `GET /custom/tasks/{id}` |
