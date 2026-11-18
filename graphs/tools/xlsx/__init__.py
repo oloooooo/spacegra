@@ -89,13 +89,14 @@ def _check_scope(path: str | Path, config: object) -> None:
 
 
 async def _local_copy(path: str, runtime: ToolRuntime) -> str:
-    """`/uploads/<name>` 换成会话上传目录里的真实文件，其余虚拟路径就是本地路径。"""
+    """`/uploads/<name>` 换成会话上传目录里的真实文件，其余虚拟路径相对 OKF 根解析。"""
     if Path(path.lstrip("/\\")).parts[:1] == ("uploads",):
         local = upload_path(runtime.config, path)
         if local is None:
             raise FileNotFoundError(f"会话里没有这个上传文件：{path}")
         return str(local)
-    return path
+    # 虚拟路径 `/空间名/x.xlsx` 不是文件系统路径：Windows 上 `/a/b` 会被当盘相对路径
+    return str(store.resolve_local(path))
 
 
 # ---------- 同步实现（跑在线程池里） ----------

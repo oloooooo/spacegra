@@ -228,6 +228,10 @@ references/
 .understand-anything/
 # pi agent 运行时状态（goal/会话记录），不入库
 .pi/
+.playwright-cli/
+
+# 本地上传目录（`uploads.dir` 的默认落点）
+data/
 
 # 前端（web/）：依赖与产物不入库
 web/node_modules/
