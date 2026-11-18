@@ -106,15 +106,18 @@ npm run dev -- --port 5273
 
 ### 0.7 超管账号
 
-超管只能直接改库：先注册，再把 `is_super` 打开。
+没有自助注册：**第一次访问**（用户表为空）用 `bootstrap` 建出来的就是超管，之后账号由它开。
 
 ```cmd
-:: 1) 注册
-curl -X POST http://127.0.0.1:2026/custom/register -H "Content-Type: application/json" -d "{\"identity\":\"root\",\"display_name\":\"root\",\"password\":\"1234\"}"
+:: 1) 初始化超管（一次性，用户表非空时返 403）
+curl -X POST http://127.0.0.1:2026/custom/bootstrap -H "Content-Type: application/json" -d "{\"identity\":\"root\",\"display_name\":\"root\",\"password\":\"root12345\"}"
 
-:: 2) 提权
-psql -h localhost -U postgres -d aegra -c "UPDATE user_tables SET is_super = true WHERE identity = 'root';"
+:: 2) 开普通账号（用上一步返回的 access_token；前端右上角「用户」tab 也能开）
+curl -X POST http://127.0.0.1:2026/custom/users -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d "{\"identity\":\"alice\",\"display_name\":\"alice\",\"password\":\"alice12345\"}"
 ```
+
+密码 8–72 字节、`display_name` 最多 10 字。已有账号要提权才需改库：
+`psql -h localhost -U postgres -d aegra -c "UPDATE user_tables SET is_super = true WHERE identity = 'root';"`
 
 登录接口字段是 `identity` / `password`（不是 `username`）：`POST /custom/login`。
 
